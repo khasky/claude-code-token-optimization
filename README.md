@@ -9,13 +9,13 @@ A practical guide to keeping Claude Code sessions cheap: what actually occupies 
 The tools split into four layers, each with its own token pool:
 
 - **Built-in practices** — LSP navigation, dirty-context subagents, disciplined `/compact` and `/clear`, and pruning MCP/plugin surface. No installs, biggest wins.
-- **Input-side tooling** — RTK (compressed shell output) plus one code-graph or cross-session memory layer (codebase-memory-mcp / claude-mem).
+- **Input-side tooling** — RTK (compressed shell output) plus a code-graph navigation layer (codebase-memory-mcp).
 - **Output-side plugins** — Caveman (terse prose) and Ponytail (minimal code), acting on disjoint parts of the reply.
 - **Docs on demand** — Context7, to stop the model hallucinating stale APIs.
 
 Then installation for Linux/macOS and Windows, and a measurement layer (`/context`, `/cost`, `rtk gain`, Session Report) so you enable one thing at a time and keep only what earns its place.
 
-> **Trust & scope note.** Except the official Anthropic plugins (the LSP connectors and Session Report), everything below is community-built (RTK, codebase-memory-mcp, claude-mem, Caveman, Ponytail, Context7, Claude HUD) — not Anthropic products. Review any `curl | sh` install script before running it. claude-mem sends observation content to a cloud LLM provider — check the company data policy before enabling it on proprietary code.
+> **Trust & scope note.** Except the official Anthropic plugins (the LSP connectors and Session Report), everything below is community-built (RTK, codebase-memory-mcp, Caveman, Ponytail, Context7, Claude HUD) — not Anthropic products. Review any `curl | sh` install script before running it.
 
 ---
 
@@ -27,7 +27,7 @@ Then installation for Linux/macOS and Windows, and a measurement layer (`/contex
   - [3. /compact, /clear, and short tasks](#3-compact-clear-and-short-tasks)
   - [4. Disable unused MCP servers & plugins, keep `CLAUDE.md` lean](#4-disable-unused-mcp-servers--plugins-keep-claudemd-lean)
 - [Part II — Input-side tooling](#part-ii--input-side-tooling)
-  - [5. RTK + codebase-memory-mcp vs RTK + claude-mem](#5-rtk--codebase-memory-mcp-vs-rtk--claude-mem)
+  - [5. RTK + codebase-memory-mcp](#5-rtk--codebase-memory-mcp)
   - [6. What to choose](#6-what-to-choose)
 - [Part III — Output-side plugins](#part-iii--output-side-plugins)
   - [7. Caveman — terse replies](#7-caveman--terse-replies)
@@ -139,24 +139,9 @@ Route by task: frontend feature → **Playwright**; performance/network investig
 
 ## Part II — Input-side tooling
 
-### 5. RTK + codebase-memory-mcp vs RTK + claude-mem
+### 5. RTK + codebase-memory-mcp
 
-These combos solve different problems:
-
-- **RTK + codebase-memory-mcp** = fewer tokens on shell output and code exploration
-- **RTK + claude-mem** = less re-explaining past work between sessions
-
-| Layer | RTK + codebase-memory-mcp | RTK + claude-mem |
-| --- | --- | --- |
-| Shell, tests, Git, logs | RTK | RTK |
-| Finding functions & dependencies | Very strong | Barely addresses |
-| Reducing Grep → Read → Read | Very strong | Limited |
-| Memory of past decisions | Limited | Very strong |
-| Resuming yesterday's task | Rebuild from Git/files | Auto-loads history |
-| Short one-off tasks | Usually cheaper | May add overhead |
-| Large monorepo | Better | Not sufficient alone |
-| Codex + Claude Code | Both well supported | Supported, deeper Claude Code integration |
-| Extra LLM calls | No | Yes (observations & summaries) |
+codebase-memory-mcp is the code-navigation half of the input layer: RTK owns shell output, this owns finding code. It replaces `grep → read → grep → read` chains with structural queries and cuts the token cost of exploration.
 
 **Why codebase-memory-mcp wins on tokens**
 
@@ -192,21 +177,11 @@ What makes it work anyway:
 
 **Why codebase-memory-mcp is the default pick here:** it's the only one giving repo-wide navigation with zero extra infrastructure — no graph database to run, no API key, no LLM calls. Serena overlaps the LSP plugins this doc already installs; CodeGraphContext buys Cypher/dead-code power at the cost of a DB backend and a 20-tool surface; code-review-graph is review-scoped, not general navigation. A pure diff-review workflow → code-review-graph can *replace* codebase-memory-mcp, but never run both.
 
-**Why claude-mem may NOT reduce tokens**
-
-Claude-mem stores tool usage, generates AI observations/summaries, and injects them into future sessions (repo). Useful for continuity, but it doesn't replace structural navigation of current code. Defaults are heavy (configuration docs): 50 observations, 10 recent sessions, 5 expanded observations; even the progressive-disclosure index costs on the order of 1k+ tokens per session start (grows with observation count — measure yours).
-
-**Short-task example:** fix one CSS bug → claude-mem loads unrelated backend history, creates new observations, generates a summary → **more tokens, not fewer**. On long projects the effect flips: no re-reading old discussions, no repeated investigations.
-
-⚠️ **Extra costs:** claude-mem uses Claude Agent SDK / Gemini / OpenRouter for compression — extra LLM operations codebase-memory-mcp doesn't have. Observation content is sent to the configured AI provider, so semantic compression isn't fully local when using a cloud model.
-
 ### 6. What to choose
 
-**RTK + codebase-memory-mcp if:** the main cost is Read/Grep/Glob; large repo or monorepo; agent keeps re-exploring call chains; you use both Claude Code and Codex; the goal is total token reduction.
+**Add codebase-memory-mcp when:** the main cost is Read/Grep/Glob; large repo or monorepo; agent keeps re-exploring call chains; you use both Claude Code and Codex; the goal is total token reduction. On a small repo where navigation isn't the main cost, RTK alone already covers most of the noise.
 
-**RTK + claude-mem if:** you resume tasks days later; past architectural decisions matter; the agent repeats past investigations; you open/close sessions often; the repo is small and navigation isn't the main cost.
-
-**Best practical setup — all three**
+**Best practical setup — both layers**
 
 They barely conflict, so combine them with a clear split of responsibilities:
 
@@ -214,7 +189,6 @@ They barely conflict, so combine them with a clear split of responsibilities:
 | --- | --- |
 | RTK | tests, build, Git, logs, shell |
 | codebase-memory-mcp | current code structure, callers, dependencies, impact analysis |
-| claude-mem (more conservatively than defaults) | why a decision was made, what was tried, known gotchas |
 
 `rtk gain` on this machine shows 55.9% average across commands (small sample); vendor claims 60–90% on common dev commands (repo). Savings depend entirely on how noisy your commands are — clean `git status` saves almost nothing.
 
@@ -371,9 +345,6 @@ claude plugin marketplace update claude-plugins-official
 claude plugin install typescript-lsp@claude-plugins-official
 claude plugin install pyright-lsp@claude-plugins-official
 
-# Claude-Mem (https://github.com/thedotmack/claude-mem)
-npx claude-mem install
-
 # Verify
 rtk --version
 rtk gain                          # must work; if it fails you likely have
@@ -381,34 +352,6 @@ rtk gain                          # must work; if it fails you likely have
 codebase-memory-mcp --version
 typescript-language-server --version
 pyright --version
-npx claude-mem status
-
-# Configure claude-mem far more conservatively than defaults:
-# short index of the most important decisions, filtered observation
-# types/concepts, no full records. (The model is already Haiku by
-# default — pinned here explicitly.) Run AFTER `npx claude-mem install`.
-SETTINGS="$HOME/.claude-mem/settings.json"
-[ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-TMP_FILE="$(mktemp)"
-jq '. + {
-  "CLAUDE_MEM_MODEL": "claude-haiku-4-5-20251001",
-  "CLAUDE_MEM_CONTEXT_OBSERVATIONS": "10",
-  "CLAUDE_MEM_CONTEXT_SESSION_COUNT": "3",
-  "CLAUDE_MEM_CONTEXT_OBSERVATION_TYPES": "bugfix,decision,discovery",
-  "CLAUDE_MEM_CONTEXT_OBSERVATION_CONCEPTS": "why-it-exists,problem-solution,gotcha,trade-off",
-  "CLAUDE_MEM_CONTEXT_FULL_COUNT": "0",
-  "CLAUDE_MEM_CONTEXT_FULL_FIELD": "narrative",
-  "CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS": "false",
-  "CLAUDE_MEM_CONTEXT_SHOW_WORK_TOKENS": "false",
-  "CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_AMOUNT": "false",
-  "CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_PERCENT": "false",
-  "CLAUDE_MEM_CONTEXT_SHOW_TERMINAL_OUTPUT": "false",
-  "CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY": "false",
-  "CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE": "false",
-  "CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED": "false"
-}' "$SETTINGS" > "$TMP_FILE" && mv "$TMP_FILE" "$SETTINGS"
-npx claude-mem restart
-npx claude-mem status
 
 # Context7 (https://github.com/upstash/context7)
 npx ctx7 setup --claude   # guided setup: auth + install
@@ -445,7 +388,7 @@ claude plugin install session-report@claude-plugins-official
 
 ### Windows 10+
 
-**Prerequisites:** PowerShell 7+ (`pwsh`), Node.js + npm on `PATH`, Claude Code CLI (`claude`). No `jq` needed — the claude-mem config is edited with native PowerShell JSON. **Do NOT use the projects' `install.sh` scripts on Windows.**
+**Prerequisites:** PowerShell 7+ (`pwsh`), Node.js + npm on `PATH`, Claude Code CLI (`claude`). **Do NOT use the projects' `install.sh` scripts on Windows.**
 
 > ⚠️ **Why not `bash … install.sh`:** on Windows `bash` usually resolves to **WSL** (or Git Bash). Under WSL the installer detects `os: linux`, downloads a **Linux** binary, and drops it inside the WSL filesystem (`/home/<user>/.local/bin/`) — invisible to and unrunnable by Windows-native Claude Code. Both projects publish real Windows `.zip` binaries (`codebase-memory-mcp-windows-amd64.zip`, `rtk-x86_64-pc-windows-msvc.zip`), so download those directly with PowerShell — no bash, no WSL, no Git Bash. Windows-on-ARM: swap `amd64`/`x86_64` for the `arm64`/`aarch64` assets.
 
@@ -512,9 +455,6 @@ claude plugin marketplace update claude-plugins-official
 claude plugin install typescript-lsp@claude-plugins-official
 claude plugin install pyright-lsp@claude-plugins-official
 
-# ── Claude-Mem (https://github.com/thedotmack/claude-mem) ─────────────
-npx claude-mem install
-
 # ── Verify ────────────────────────────────────────────────────────────
 rtk --version
 rtk gain                          # must work; if it fails you likely have
@@ -522,55 +462,6 @@ rtk gain                          # must work; if it fails you likely have
 codebase-memory-mcp --version
 typescript-language-server --version
 pyright --version
-npx claude-mem status
-
-# ── Configure claude-mem conservatively (native PowerShell, no jq) ────
-# Short index of the most important decisions, filtered observation
-# types/concepts, no full records. Model pinned to Haiku (already the default).
-# Run AFTER `npx claude-mem install`.
-$settings = "$env:USERPROFILE\.claude-mem\settings.json"
-New-Item -ItemType Directory -Force -Path (Split-Path $settings) | Out-Null
-if (-not (Test-Path $settings)) { '{}' | Set-Content -Path $settings -Encoding utf8 }
-
-$json = Get-Content $settings -Raw | ConvertFrom-Json
-$overrides = [ordered]@{
-  CLAUDE_MEM_MODEL                        = "claude-haiku-4-5-20251001"
-  CLAUDE_MEM_CONTEXT_OBSERVATIONS         = "10"
-  CLAUDE_MEM_CONTEXT_SESSION_COUNT        = "3"
-  CLAUDE_MEM_CONTEXT_OBSERVATION_TYPES    = "bugfix,decision,discovery"
-  CLAUDE_MEM_CONTEXT_OBSERVATION_CONCEPTS = "why-it-exists,problem-solution,gotcha,trade-off"
-  CLAUDE_MEM_CONTEXT_FULL_COUNT           = "0"
-  CLAUDE_MEM_CONTEXT_FULL_FIELD           = "narrative"
-  CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS     = "false"
-  CLAUDE_MEM_CONTEXT_SHOW_WORK_TOKENS     = "false"
-  CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_AMOUNT  = "false"
-  CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_PERCENT = "false"
-  CLAUDE_MEM_CONTEXT_SHOW_TERMINAL_OUTPUT = "false"
-  CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY    = "false"
-  CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE    = "false"
-  CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED      = "false"
-}
-foreach ($k in $overrides.Keys) {
-  $json | Add-Member -NotePropertyName $k -NotePropertyValue $overrides[$k] -Force
-}
-$json | ConvertTo-Json -Depth 10 | Set-Content -Path $settings -Encoding utf8
-
-# Verify
-$Config = Get-Content `
-    "$HOME\.claude-mem\settings.json" `
-    -Raw | ConvertFrom-Json
-$Config | Select-Object `
-    CLAUDE_MEM_MODEL,
-    CLAUDE_MEM_CONTEXT_OBSERVATIONS,
-    CLAUDE_MEM_CONTEXT_SESSION_COUNT,
-    CLAUDE_MEM_CONTEXT_OBSERVATION_TYPES,
-    CLAUDE_MEM_CONTEXT_OBSERVATION_CONCEPTS,
-    CLAUDE_MEM_CONTEXT_FULL_COUNT,
-    CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY,
-    CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE
-
-npx claude-mem restart
-npx claude-mem status
 
 # ── Context7 (https://github.com/upstash/context7) ────────────────────
 # Pre-installed only on Coder workspaces (check /plugins there). Elsewhere:
@@ -607,31 +498,10 @@ claude plugin install session-report@claude-plugins-official
 /claude-hud:setup   # guided status-line preset; run after /reload-plugins so it overrides
 ```
 
-#### claude-mem settings.json — what the preset does
-
-> **Don't hand-replace the whole file with this JSON.** `npx claude-mem install` writes `provider`, authentication, worker port, and other runtime keys into `~/.claude-mem/settings.json`. The commands above (`jq '. + {…}'` on Unix, `ConvertFrom-Json` → `Add-Member -Force` → `ConvertTo-Json` on Windows) **update only the selected fields and preserve everything else** — run them *after* the installer, never instead of it.
-
-What each override buys, versus claude-mem defaults:
-
-| Key | Value | Effect |
-| --- | --- | --- |
-| `CLAUDE_MEM_CONTEXT_OBSERVATIONS` | `10` (default 50) | Smaller session-start context. |
-| `CLAUDE_MEM_CONTEXT_SESSION_COUNT` | `3` (default 10) | Less stale history carried in. |
-| `CLAUDE_MEM_CONTEXT_OBSERVATION_TYPES` | `bugfix,decision,discovery` | Drops routine `change`, `feature`, `refactor` entries. |
-| `CLAUDE_MEM_CONTEXT_FULL_COUNT` | `0` | No expanded narratives injected. |
-| `CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY` / `…_LAST_MESSAGE` | `false` | Previous session isn't duplicated into context. |
-| `CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS` / `…_WORK_TOKENS` / `…_SAVINGS_AMOUNT` / `…_SAVINGS_PERCENT` / `…_TERMINAL_OUTPUT` | `false` | Token-stat metrics and the stats banner line don't occupy context. |
-| `CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED` | `false` | claude-mem won't scatter extra `CLAUDE.md` files into project folders. |
-| `CLAUDE_MEM_MODEL` | `claude-haiku-4-5-20251001` | Haiku generates the memory — cheaper (already the default; pinned explicitly). |
-
-**Valid values (official):** observation *types* are `bugfix`, `feature`, `refactor`, `discovery`, `decision`, `change`; observation *concepts* include `gotcha`, `trade-off`, `why-it-exists`. `CLAUDE_MEM_CONTEXT_FULL_COUNT=0` is officially allowed.
-
 #### Windows notes
 
 - **No `bash`/`install.sh`.** On Windows `bash` typically means WSL, whose `install.sh` fetches a Linux binary into the WSL VM — useless to Windows Claude Code. `Install-WinZipBinary` downloads the real Windows `.zip` (`Invoke-WebRequest` + `Expand-Archive`), finds the `.exe`, and drops it in `~/.local/bin` under a canonical name.
 - **`export PATH=…` → PowerShell.** The original bash `export PATH="$HOME/.local/bin:$PATH"` becomes STEP 0: `$env:PATH` for the current session plus `[Environment]::SetEnvironmentVariable(... "User")` to persist it. Open a new terminal after install so the persisted `PATH` is picked up.
-- **`jq` → native JSON.** `Get-Content | ConvertFrom-Json` → `Add-Member -Force` → `ConvertTo-Json` replaces the `jq '. + {…}'` merge with no extra dependency. `-Depth 10` guards against deep-object truncation.
-- **`$HOME`, `mktemp`, `[ -f … ]`** have no PowerShell equivalents inline — replaced by `$env:USERPROFILE`, `Set-Content` to a temp-free write, and `Test-Path`.
 - Everything else (`npm`, `npx`, `claude …`) runs natively on Windows unchanged.
 - **RTK hook fidelity on Windows:** the Claude Code hook intermittently returns output not faithful to the real command — duplicated lines, spurious markup ([#2176](https://github.com/rtk-ai/rtk/issues/2176)). The exit-code-beats-summary rule matters doubly here; if it bites often, drop the global hook (`rtk init -g`) and wrap only trusted commands manually (`rtk git diff`).
 
@@ -642,7 +512,6 @@ Don't trust vendor numbers — measure on your own workflow:
 
 ```
 rtk gain              # shell-output savings (add --history for per-command log)
-npx claude-mem status # memory state; the session-start banner shows tokens read vs past work
 ```
 
 Inside a session:
@@ -655,7 +524,7 @@ Inside a session:
 
 **Live status line — Claude HUD.** Instead of running `/context` on demand, [Claude HUD](https://github.com/jarrodwatts/claude-hud) keeps a context-fullness bar plus model, project path, git branch, and rate limits in the status line every turn — using Claude Code's native token data, not estimates (optional extra lines show tool/agent/todo activity). It's a monitoring aid, not a token saver. `/claude-hud:setup` runs a guided preset picker (Full/Essential/Minimal) and **overwrites the status line**, so install and set it up *after* Caveman, whose plugin sets its own — Claude HUD then wins. Requires Claude Code v1.0.80+ and Node 18+; install steps in Part V.
 
-**Cross-session forensics — Session Report.** [session-report](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/session-report) (official) reads the last week of transcripts under `~/.claude/projects` and drops a self-contained HTML report in the working directory: input/output tokens, cache efficiency and miss causes, the most expensive prompts, subagent and skill usage, and per-session spend — sortable tables and bar charts, plus a skill that surfaces which projects or skills eat disproportionate tokens and whether one prompt skews the totals. This is the layer that actually answers *did it pay off*: whether RTK cut total spend, whether Caveman nets a saving, whether claude-mem isn't dragging in stale history, whether Context7 fires only when needed, and whether codebase-memory-mcp really reduced Read/Grep. Install, `/reload-plugins`, then invoke its `session-report` skill (ask for a session report). Known cosmetic bug: a missing manifest can list the skill twice under different namespaces — harmless to the report, but it clutters the skills list. Install steps in Part V.
+**Cross-session forensics — Session Report.** [session-report](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/session-report) (official) reads the last week of transcripts under `~/.claude/projects` and drops a self-contained HTML report in the working directory: input/output tokens, cache efficiency and miss causes, the most expensive prompts, subagent and skill usage, and per-session spend — sortable tables and bar charts, plus a skill that surfaces which projects or skills eat disproportionate tokens and whether one prompt skews the totals. This is the layer that actually answers *did it pay off*: whether RTK cut total spend, whether Caveman nets a saving, whether Context7 fires only when needed, and whether codebase-memory-mcp really reduced Read/Grep. Install, `/reload-plugins`, then invoke its `session-report` skill (ask for a session report). Known cosmetic bug: a missing manifest can list the skill twice under different namespaces — harmless to the report, but it clutters the skills list. Install steps in Part V.
 
 **Rule:** enable one layer at a time, compare a week of `rtk gain` / `/cost` before and after, keep what pays for itself.
 
@@ -665,7 +534,6 @@ Inside a session:
 | --- | --- | --- |
 | RTK | shell, tests, Git, logs | 30–98% on noisy commands [measured] |
 | codebase-memory-mcp | structural code navigation | ~10× on exploration, −9pp answer quality [study] |
-| claude-mem (conservative config) | cross-session memory | saves re-investigation; ~5k/session index tax [measured] |
 | TypeScript / Python LSP | definitions, references, type errors | replaces multi-KB grep+read chains [proxy] |
 | Context7 | fresh library docs | indirect — fewer retry loops |
 | Caveman (enable/disable on purpose) | terse agent replies | ~65% of output tokens [measured] |
@@ -682,7 +550,7 @@ Three guides, one split — pick the layer you need:
 
 - [Awesome AGENTS.md](https://github.com/khasky/awesome-agents-md) — the base, tool-agnostic ruleset every agent imports (one `AGENTS.md`). Token optimization sits on top of it.
 - [Awesome Agent Skills](https://github.com/khasky/awesome-agent-skills) — portable `SKILL.md` skills every agent loads: code review, debugging, security and leak audits, code and text cleanup.
-- **Claude Code Token Optimization** — *this repo:* the token-efficiency layer (RTK, LSP, Context7, `codebase-memory-mcp`, claude-mem, Caveman, Ponytail).
+- **Claude Code Token Optimization** — *this repo:* the token-efficiency layer (RTK, LSP, Context7, `codebase-memory-mcp`, Caveman, Ponytail).
 - [Agent MCP Integrations](https://github.com/khasky/agent-mcp-integrations) — MCP servers that connect agents to browsers, cloud, databases, infra, and domain APIs; the two browser servers referenced here are covered there in full.
 - [Claude Code Security Audit](https://github.com/khasky/claude-code-security-audit) — the layered security-audit workflow (deep audit, continuous guardrails, scanners).
 
@@ -690,4 +558,4 @@ Three guides, one split — pick the layer you need:
 
 ## License
 
-Released under the [MIT license](LICENSE). The community tools this guide installs — RTK, codebase-memory-mcp, claude-mem, Caveman, Ponytail, Context7, Claude HUD — keep their own licenses; check each project before use.
+Released under the [MIT license](LICENSE). The community tools this guide installs — RTK, codebase-memory-mcp, Caveman, Ponytail, Context7, Claude HUD — keep their own licenses; check each project before use.
