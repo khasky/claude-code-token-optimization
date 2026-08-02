@@ -9,13 +9,13 @@ A practical guide to keeping Claude Code sessions cheap: what actually occupies 
 The tools split into four layers, each with its own token pool:
 
 - **Built-in practices** — LSP navigation, dirty-context subagents, disciplined `/compact` and `/clear`, and pruning MCP/plugin surface. No installs, biggest wins.
-- **Input-side tooling** — RTK (compressed shell output) plus a code-graph navigation layer (codebase-memory-mcp).
+- **Input-side tooling** — RTK (compressed shell output), a code-graph navigation layer (codebase-memory-mcp), and ast-grep for structural search plus codemods the CLI performs instead of the model.
 - **Output-side plugins** — Caveman (terse prose) and Ponytail (minimal code), acting on disjoint parts of the reply.
 - **Docs on demand** — Context7, to stop the model hallucinating stale APIs.
 
 Then installation for Linux/macOS and Windows, and a measurement layer (`/context`, `/cost`, `rtk gain`, Session Report) so you enable one thing at a time and keep only what earns its place.
 
-> **Trust & scope note.** Except the official Anthropic plugins (the LSP connectors and Session Report), everything below is community-built (RTK, codebase-memory-mcp, Caveman, Ponytail, Context7, Claude HUD) — not Anthropic products. Review any `curl | sh` install script before running it.
+> **Trust & scope note.** Except the official Anthropic plugins (the LSP connectors and Session Report), everything below is community-built (RTK, codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7, Claude HUD) — not Anthropic products. Review any `curl | sh` install script before running it.
 
 ---
 
@@ -28,12 +28,13 @@ Then installation for Linux/macOS and Windows, and a measurement layer (`/contex
   - [4. Disable unused MCP servers & plugins, keep `CLAUDE.md` lean](#4-disable-unused-mcp-servers--plugins-keep-claudemd-lean)
 - [Part II — Input-side tooling](#part-ii--input-side-tooling)
   - [5. RTK + codebase-memory-mcp](#5-rtk--codebase-memory-mcp)
-  - [6. What to choose](#6-what-to-choose)
+  - [6. ast-grep — structural search and controlled codemods](#6-ast-grep--structural-search-and-controlled-codemods)
+  - [7. What to choose](#7-what-to-choose)
 - [Part III — Output-side plugins](#part-iii--output-side-plugins)
-  - [7. Caveman — terse replies](#7-caveman--terse-replies)
-  - [8. Ponytail — least code that works](#8-ponytail--least-code-that-works)
+  - [8. Caveman — terse replies](#8-caveman--terse-replies)
+  - [9. Ponytail — least code that works](#9-ponytail--least-code-that-works)
 - [Part IV — Docs on demand](#part-iv--docs-on-demand)
-  - [9. Context7](#9-context7)
+  - [10. Context7](#10-context7)
 - [Part V — Installation](#part-v--installation)
   - [Linux/macOS (bash)](#linuxmacos-bash)
   - [Windows 10+](#windows-10)
@@ -177,11 +178,145 @@ What makes it work anyway:
 
 **Why codebase-memory-mcp is the default pick here:** it's the only one giving repo-wide navigation with zero extra infrastructure — no graph database to run, no API key, no LLM calls. Serena overlaps the LSP plugins this doc already installs; CodeGraphContext buys Cypher/dead-code power at the cost of a DB backend and a 20-tool surface; code-review-graph is review-scoped, not general navigation. A pure diff-review workflow → code-review-graph can *replace* codebase-memory-mcp, but never run both.
 
-### 6. What to choose
+### 6. ast-grep — structural search and controlled codemods
+
+[ast-grep](https://ast-grep.github.io/) matches the syntax tree instead of the text, and can rewrite what it matches. It is a plain CLI — no MCP server, no plugin — so the agent runs it through the shell and it adds **zero** permanent tool-surface tax (§4).
+
+**Why it saves tokens — two different pools:**
+
+- **Input.** `rg 'fetch\('` also hits comments, strings, docs and dead code, so the agent reads whole files to sort real calls from noise. `ast-grep -p 'fetch($$$ARGS)'` returns only real call expressions — the noise never enters the context.
+- **Output, and this is the bigger one.** A rename across 40 files done by the model costs 40 file reads in and 40 edits out. Done by ast-grep it costs one command out; the CLI performs the edits and only `git diff --stat` comes back.
+
+**Install per project**, so the version is pinned in the lockfile and the agent doesn't depend on a global `PATH`:
+
+```bash
+npm install --save-dev @ast-grep/cli
+npx ast-grep --version
+```
+
+The command is `ast-grep`. Don't use the `sg` short alias on Linux — it collides with the system `setgroups` command.
+
+**Pattern syntax.** Two metavariables cover almost everything; both must be uppercase:
+
+| Pattern | Matches |
+| --- | --- |
+| `$NODE` | exactly one AST node (one argument, one expression, one name) |
+| `$$$ARGS` | zero or more nodes — any argument list |
+
+Repeating the same name means *the same code in both places*: `$VALUE && $VALUE()` matches `user.cb && user.cb()` but not `a && b()`.
+
+**Search examples.** Identical in bash and PowerShell — single quotes stop both shells from expanding `$`:
+
+```bash
+npx ast-grep -p 'console.log($$$ARGS)' -l ts src        # -l tsx for TSX files
+npx ast-grep -p '$OBJECT.save($$$ARGS)' -l ts src       # repository.save(user), db.save(entity, opts)
+npx ast-grep -p 'requests.get($$$ARGS)' -l python src
+```
+
+**Rewrites — always search first, then `--interactive`:**
+
+```bash
+npx ast-grep -p '$PROP && $PROP()' -l ts src                                 # 1. see every match
+npx ast-grep -p '$PROP && $PROP()' -r '$PROP?.()' --interactive -l ts src    # 2. accept/reject per hunk
+git diff --stat && npm test                                                  # 3. verify
+```
+
+⚠️ **Never `ast-grep scan --update-all`** unless a bulk unconditional rewrite is exactly what you asked for — it applies every fix with no confirmation, and a bad pattern then costs far more tokens to unwind than the codemod saved.
+
+**Give the rules to the agent as a skill, not as `CLAUDE.md` text.** Memory files ride along with every message (§4); a skill costs only its name and description until it's actually used.
+
+```bash
+mkdir -p .claude/skills/ast-grep
+cat > .claude/skills/ast-grep/SKILL.md <<'EOF'
+---
+name: ast-grep
+description: Syntax-aware structural search and controlled codemods (TypeScript, TSX, JavaScript, Python) via the project-local ast-grep CLI. Prefer LSP for symbol references and rg for literal text.
+---
+
+Run the project-local CLI: `npx ast-grep`.
+
+1. Search before rewriting; scope to the narrowest relevant directory.
+2. `$NODE` matches one AST node, `$$$ARGS` matches zero or more.
+3. Review every match before changing code.
+4. Rewrite only with `--interactive`. Never use `--update-all` unless the user explicitly asks for an unconditional bulk rewrite.
+5. After a rewrite: inspect `git diff`, then run targeted tests.
+
+Tool routing: literal text or an exact error string -> `rg`; definition, references, rename -> LSP; architecture and call chains -> codebase-memory-mcp; repeated syntax patterns and bulk codemods -> ast-grep.
+EOF
+```
+
+```powershell
+$SkillDir = ".claude\skills\ast-grep"
+New-Item -ItemType Directory -Path $SkillDir -Force | Out-Null
+@'
+---
+name: ast-grep
+description: Syntax-aware structural search and controlled codemods (TypeScript, TSX, JavaScript, Python) via the project-local ast-grep CLI. Prefer LSP for symbol references and rg for literal text.
+---
+
+Run the project-local CLI: `npx ast-grep`.
+
+1. Search before rewriting; scope to the narrowest relevant directory.
+2. `$NODE` matches one AST node, `$$$ARGS` matches zero or more.
+3. Review every match before changing code.
+4. Rewrite only with `--interactive`. Never use `--update-all` unless the user explicitly asks for an unconditional bulk rewrite.
+5. After a rewrite: inspect `git diff`, then run targeted tests.
+
+Tool routing: literal text or an exact error string -> `rg`; definition, references, rename -> LSP; architecture and call chains -> codebase-memory-mcp; repeated syntax patterns and bulk codemods -> ast-grep.
+'@ | Set-Content -Path "$SkillDir\SKILL.md" -Encoding utf8
+```
+
+Check it registered with `/skills`; invoke it manually with `/ast-grep`, or let the `description` trigger it automatically on structural-search requests.
+
+**Permissions — don't allow the whole CLI.** `"Bash(npx ast-grep *)"` also auto-approves every rewrite command. Pin the allowlist to read-only npm scripts (`npm pkg set "scripts.ast:scan=ast-grep scan"`, `npm pkg set "scripts.ast:test=ast-grep test"`) and leave `npx ast-grep … -r` requiring approval, in `.claude/settings.json`:
+
+```json
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(npm run ast:scan *)",
+      "Bash(npm run ast:test *)",
+      "PowerShell(npm run ast:scan *)",
+      "PowerShell(npm run ast:test *)"
+    ]
+  }
+}
+```
+
+**Optional — patterns worth keeping.** One-off searches need only `-p`. For rules that live in Git, `npx ast-grep new project` scaffolds `sgconfig.yml`, `rules/`, `rule-tests/`, `utils/`:
+
+```yaml
+# rules/no-console-log.yml
+id: no-console-log
+language: TypeScript
+severity: warning
+message: Avoid console.log in production code.
+rule:
+  pattern: console.log($$$ARGS)
+```
+
+Run one rule with `npx ast-grep scan --rule rules/no-console-log.yml src`, all of them with `npm run ast:scan`.
+
+**Routing — ast-grep is not a replacement for the other three:**
+
+| Task | Tool |
+| --- | --- |
+| Exact string, error message, TODO | `rg` |
+| Definition, references, rename one symbol | LSP (§1) |
+| Call chains, dependencies, impact | codebase-memory-mcp (§5) |
+| The same syntactic construct in many places | `ast-grep` |
+| Bulk codemod across files | `ast-grep --interactive` |
+
+**Benchmark:** no vendor token number. The mechanism is the same as LSP's — matches replace file reads, and the CLI does the editing instead of the model [proxy].
+
+### 7. What to choose
 
 **Add codebase-memory-mcp when:** the main cost is Read/Grep/Glob; large repo or monorepo; agent keeps re-exploring call chains; you use both Claude Code and Codex; the goal is total token reduction. On a small repo where navigation isn't the main cost, RTK alone already covers most of the noise.
 
-**Best practical setup — both layers**
+**Add ast-grep when:** the repo has repeated syntactic patterns (a deprecated API, a logger call, an old idiom) or a codemod is coming. It costs nothing while idle — a CLI, not a server — so on a JS/TS/Python repo there is no reason to skip it.
+
+**Best practical setup — the whole input layer**
 
 They barely conflict, so combine them with a clear split of responsibilities:
 
@@ -189,6 +324,7 @@ They barely conflict, so combine them with a clear split of responsibilities:
 | --- | --- |
 | RTK | tests, build, Git, logs, shell |
 | codebase-memory-mcp | current code structure, callers, dependencies, impact analysis |
+| ast-grep | repeated syntax patterns; bulk rewrites performed by the CLI, not by the model |
 
 `rtk gain` on this machine shows 55.9% average across commands (small sample); vendor claims 60–90% on common dev commands (repo). Savings depend entirely on how noisy your commands are — clean `git status` saves almost nothing.
 
@@ -204,7 +340,7 @@ The proven core is what RTK was built for: `git status`/`diff`/`log`, test runne
 
 ## Part III — Output-side plugins
 
-### 7. Caveman — terse replies
+### 8. Caveman — terse replies
 
 Caveman makes the agent answer tersely: drops filler, articles, and pleasantries while keeping all technical substance; code blocks stay untouched. Cuts **output** tokens only — input/cache usage is unchanged. Disable for documentation, user-facing texts, or nuanced explanations (`stop caveman`).
 
@@ -239,7 +375,7 @@ full:   New object ref each render. Wrap object in useMemo.
 ultra:  New ref/render. useMemo it.
 ```
 
-### 8. Ponytail — least code that works
+### 9. Ponytail — least code that works
 
 Ponytail biases the agent toward the minimal working change ("the best code is the code you never wrote"): fewer generated lines → fewer output tokens and less code to review. Disable when exhaustiveness is the point (test suites, migrations, security-sensitive code).
 
@@ -291,7 +427,7 @@ They stack cleanly — different token pools: Caveman compresses the agent's pro
 
 ## Part IV — Docs on demand
 
-### 9. Context7
+### 10. Context7
 
 Context7 fetches current, version-specific library documentation on demand instead of the model guessing from stale training data. It saves tokens **indirectly**: fewer hallucinated APIs → fewer failed attempts and retry loops. Each docs fetch itself costs tokens, so it pays off on unfamiliar or fast-moving libraries, not on every question. Pre-installed only on Coder workspaces (check `/plugins`); on a local machine install it — see Installation below.
 
@@ -335,6 +471,13 @@ rtk hook check "grep foo bar.txt"   # must print the command UNCHANGED
 curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
 codebase-memory-mcp config set auto_index true
 codebase-memory-mcp config set auto_index_limit 50000
+
+# ast-grep (https://ast-grep.github.io) — per project, not machine-wide: run this
+# inside each repo, then add the skill and the permissions from Part II §6.
+cd /path/to/project
+npm install --save-dev @ast-grep/cli
+npm pkg set "scripts.ast:scan=ast-grep scan" "scripts.ast:test=ast-grep test"
+npx ast-grep --version
 
 # LSP binaries
 npm install -g typescript-language-server pyright
@@ -447,6 +590,14 @@ codebase-memory-mcp --version
 codebase-memory-mcp config set auto_index true
 codebase-memory-mcp config set auto_index_limit 50000
 
+# ── ast-grep (https://ast-grep.github.io) ─────────────────────────────
+# Per project, not machine-wide: run this inside each repo, then add the
+# skill and the permissions from Part II §6.
+Set-Location C:\path\to\project
+npm install --save-dev @ast-grep/cli
+npm pkg set "scripts.ast:scan=ast-grep scan" "scripts.ast:test=ast-grep test"
+npx ast-grep --version
+
 # ── LSP binaries (native npm) ─────────────────────────────────────────
 npm install -g typescript-language-server pyright
 
@@ -534,6 +685,7 @@ Inside a session:
 | --- | --- | --- |
 | RTK | shell, tests, Git, logs | 30–98% on noisy commands [measured] |
 | codebase-memory-mcp | structural code navigation | ~10× on exploration, −9pp answer quality [study] |
+| ast-grep (CLI — no MCP or plugin surface) | syntax-pattern search, bulk codemods | matches instead of file reads; the CLI edits, the model doesn't [proxy] |
 | TypeScript / Python LSP | definitions, references, type errors | replaces multi-KB grep+read chains [proxy] |
 | Context7 | fresh library docs | indirect — fewer retry loops |
 | Caveman (enable/disable on purpose) | terse agent replies | ~65% of output tokens [measured] |
@@ -558,4 +710,4 @@ Three guides, one split — pick the layer you need:
 
 ## License
 
-Released under the [MIT license](LICENSE). The community tools this guide installs — RTK, codebase-memory-mcp, Caveman, Ponytail, Context7, Claude HUD — keep their own licenses; check each project before use.
+Released under the [MIT license](LICENSE). The community tools this guide installs — RTK, codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7, Claude HUD — keep their own licenses; check each project before use.
