@@ -649,8 +649,6 @@ Don't trust vendor numbers — measure on your own workflow. Inside a session:
 | Claude HUD (status-line plugin) | live context/cost/rate-limit visibility | no direct token savings — monitoring aid; overrides the status line |
 | Session Report (official plugin) | forensic per-session token/cache/subagent/skill report | measurement — proves whether each layer nets out |
 | Browser MCP (Playwright *or* Chrome DevTools, one at a time) | frontend testing / perf-network debugging | toggle per task — idle server is tool-surface tax, snapshots cost 10k+ tokens |
-| ~~RTK~~ (**not recommended** — Part V) | shell-output compression | rewrites what the agent sees; fabricated and dropped matches [measured] |
-
 ---
 
 ## Related
