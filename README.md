@@ -9,13 +9,13 @@ A practical guide to keeping Claude Code sessions cheap: what actually occupies 
 The tools split into four layers, each with its own token pool:
 
 - **Built-in practices** — LSP navigation, dirty-context subagents, disciplined `/compact` and `/clear`, and pruning MCP/plugin surface. No installs, biggest wins.
-- **Input-side tooling** — RTK (compressed shell output), a code-graph navigation layer (codebase-memory-mcp), and ast-grep for structural search plus codemods the CLI performs instead of the model.
+- **Input-side tooling** — a code-graph navigation layer (codebase-memory-mcp) and ast-grep for structural search plus codemods the CLI performs instead of the model.
 - **Output-side plugins** — Caveman (terse prose) and Ponytail (minimal code), acting on disjoint parts of the reply.
 - **Docs on demand** — Context7, to stop the model hallucinating stale APIs.
 
-Then installation for Linux/macOS and Windows, and a measurement layer (`/context`, `/cost`, `rtk gain`, Session Report) so you enable one thing at a time and keep only what earns its place.
+Then a short list of tools **not** worth installing, installation for Linux/macOS and Windows, and a measurement layer (`/context`, `/cost`, Session Report) so you enable one thing at a time and keep only what earns its place.
 
-> **Trust & scope note.** Except the official Anthropic plugins (the LSP connectors and Session Report), everything below is community-built (RTK, codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7, Claude HUD) — not Anthropic products. Review any `curl | sh` install script before running it.
+> **Trust & scope note.** Except the official Anthropic plugins (the LSP connectors and Session Report), everything below is community-built (codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7, Claude HUD) — not Anthropic products. Review any `curl | sh` install script before running it.
 
 ---
 
@@ -27,7 +27,7 @@ Then installation for Linux/macOS and Windows, and a measurement layer (`/contex
   - [3. /compact, /clear, and short tasks](#3-compact-clear-and-short-tasks)
   - [4. Disable unused MCP servers & plugins, keep `CLAUDE.md` lean](#4-disable-unused-mcp-servers--plugins-keep-claudemd-lean)
 - [Part II — Input-side tooling](#part-ii--input-side-tooling)
-  - [5. RTK + codebase-memory-mcp](#5-rtk--codebase-memory-mcp)
+  - [5. codebase-memory-mcp — code-graph navigation](#5-codebase-memory-mcp--code-graph-navigation)
   - [6. ast-grep — structural search and controlled codemods](#6-ast-grep--structural-search-and-controlled-codemods)
   - [7. What to choose](#7-what-to-choose)
 - [Part III — Output-side plugins](#part-iii--output-side-plugins)
@@ -35,10 +35,12 @@ Then installation for Linux/macOS and Windows, and a measurement layer (`/contex
   - [9. Ponytail — least code that works](#9-ponytail--least-code-that-works)
 - [Part IV — Docs on demand](#part-iv--docs-on-demand)
   - [10. Context7](#10-context7)
-- [Part V — Installation](#part-v--installation)
+- [Part V — Tools I don't recommend](#part-v--tools-i-dont-recommend)
+  - [11. RTK — shell-output compression](#11-rtk--shell-output-compression)
+- [Part VI — Installation](#part-vi--installation)
   - [Linux/macOS (bash)](#linuxmacos-bash)
   - [Windows 10+](#windows-10)
-- [Part VI — Measuring savings](#part-vi--measuring-savings)
+- [Part VII — Measuring savings](#part-vii--measuring-savings)
 - [Summary](#summary)
 - [Related](#related)
 - [License](#license)
@@ -87,7 +89,7 @@ The subagent gets its own context window; only the short summary returns to the 
 
 ### 3. /compact, /clear, and short tasks
 
-RTK shrinks new tool outputs but doesn't remove already-accumulated junk. Compact with explicit instructions:
+Context accumulates junk faster than any tool trims it. Compact with explicit instructions:
 
 ```
 /compact Preserve: current goal, changed files, confirmed architecture,
@@ -140,15 +142,15 @@ Route by task: frontend feature → **Playwright**; performance/network investig
 
 ## Part II — Input-side tooling
 
-### 5. RTK + codebase-memory-mcp
+### 5. codebase-memory-mcp — code-graph navigation
 
-codebase-memory-mcp is the code-navigation half of the input layer: RTK owns shell output, this owns finding code. It replaces `grep → read → grep → read` chains with structural queries and cuts the token cost of exploration.
+codebase-memory-mcp owns finding code. It replaces `grep → read → grep → read` chains with structural queries and cuts the token cost of exploration.
 
 **Why codebase-memory-mcp wins on tokens**
 
 It builds a persistent knowledge graph of the repo (functions, classes, calls, dependencies, routes, cross-service links). Instead of dozens of greps and full-file reads: one structural query like *"who calls ProcessOrder?"*. No LLM inside; indexing runs locally, no API key (repo).
 
-It perfectly complements RTK: RTK shrinks the output of commands that already ran; **codebase-memory-mcp** prevents unnecessary grep/read commands from running at all.
+Its win is preventive: unnecessary grep/read commands never run, so their output never reaches the context.
 
 **Benchmark:**
 
@@ -312,7 +314,7 @@ Run one rule with `npx ast-grep scan --rule rules/no-console-log.yml src`, all o
 
 ### 7. What to choose
 
-**Add codebase-memory-mcp when:** the main cost is Read/Grep/Glob; large repo or monorepo; agent keeps re-exploring call chains; you use both Claude Code and Codex; the goal is total token reduction. On a small repo where navigation isn't the main cost, RTK alone already covers most of the noise.
+**Add codebase-memory-mcp when:** the main cost is Read/Grep/Glob; large repo or monorepo; agent keeps re-exploring call chains; you use both Claude Code and Codex; the goal is total token reduction. On a small repo where navigation isn't the main cost, the built-in practices in Part I already cover most of the noise.
 
 **Add ast-grep when:** the repo has repeated syntactic patterns (a deprecated API, a logger call, an old idiom) or a codemod is coming. It costs nothing while idle — a CLI, not a server — so on a JS/TS/Python repo there is no reason to skip it.
 
@@ -322,21 +324,10 @@ They barely conflict, so combine them with a clear split of responsibilities:
 
 | Tool | Owns |
 | --- | --- |
-| RTK | tests, build, Git, logs, shell |
 | codebase-memory-mcp | current code structure, callers, dependencies, impact analysis |
 | ast-grep | repeated syntax patterns; bulk rewrites performed by the CLI, not by the model |
 
-`rtk gain` on this machine shows 55.9% average across commands (small sample); vendor claims 60–90% on common dev commands (repo). Savings depend entirely on how noisy your commands are — clean `git status` saves almost nothing.
-
-**RTK filters can lie — scope the hook to proven commands**
-
-A filter can fabricate a clean summary over real errors, and a wrong summary sends the agent into retry loops that cost more than the filter saved. Documented cases: the generic lint filter printed "Lint: No issues found" over 4 real biome errors (local incident); `rtk grep` truncates lines to 80 chars and drops the matching part ([#1161](https://github.com/rtk-ai/rtk/issues/1161)); Playwright output collapses from 100K+ tokens to ~9 ([#1125](https://github.com/rtk-ai/rtk/issues/1125), [#690](https://github.com/rtk-ai/rtk/issues/690)); `rtk ls` returns a literal `"(empty)"` for any input ([#1418](https://github.com/rtk-ai/rtk/issues/1418)); piped/redirected output gets silently corrupted ([#1282](https://github.com/rtk-ai/rtk/issues/1282)); on Windows the Claude Code hook intermittently returns output that doesn't match the real command ([#2176](https://github.com/rtk-ai/rtk/issues/2176)).
-
-The proven core is what RTK was built for: `git status`/`diff`/`log`, test runners, builds. RTK has no allowlist mode — the only scoping mechanism is `[hooks].exclude_commands` in its config, so the install blocks below seed it with the known-broken filters right after `rtk init`. Working rules on top of that:
-
-- **Exit code beats summary.** Non-zero exit with clean-looking filtered output = the filter lied; re-run raw via `rtk proxy <cmd>` before concluding anything.
-- **Dry-run new tools** with `rtk hook check "<command>"`; no dedicated filter → add to `exclude_commands`.
-- Config wiring has broken before ([#1335](https://github.com/rtk-ai/rtk/issues/1335), [#243](https://github.com/rtk-ai/rtk/issues/243)) — after editing the config, verify an excluded command actually passes through unchanged.
+Both act before the model reads anything, so they don't compete: one answers *where is the code*, the other *rewrite this construct everywhere*. Shell output stays raw on purpose — see Part V.
 
 ## Part III — Output-side plugins
 
@@ -435,40 +426,45 @@ Context7 fetches current, version-specific library documentation on demand inste
 
 **Benchmark:** no meaningful direct number — the win is avoided retry loops, not compressed output.
 
-## Part V — Installation
+## Part V — Tools I don't recommend
+
+Popular token-savers that cost more than they save. The failure mode that matters is not "saves less than advertised" — it's a tool that changes what the agent *sees*, because then a defect is indistinguishable from the truth and the agent acts on fiction.
+
+### 11. RTK — shell-output compression
+
+[RTK](https://github.com/rtk-ai/rtk) wraps shell commands and rewrites their output into a compact summary, hooked globally into Claude Code. The idea is sound; the fidelity isn't. Filtered output arrives with no marker of what was dropped or altered, so the agent has nothing to distrust.
+
+**Measured failures, one project, one week** (each re-verified afterwards with the built-in tools and `git diff`):
+
+- **Fabricated a match and dropped a real one.** A repo search reported a hit in a file that does not contain the string anywhere, and omitted the real hit in `package.json`. The wrong conclusion ("nothing runs this config") became a task that turned out to be already done.
+- **Rewrote non-grep stdout.** `node -e` printing `package.json` scripts returned 34 of 36: one entry silently missing, another's value altered. File unmodified, rerun printed 36/36. Anything crossing the hook is exposed, not just wrapped tools.
+- **False zero.** `0 matches` on a file that had three, nearly deleting docs for live API.
+- **Invented counters and mislabeled lines.** A single-file search reported "2 matches in 2 files"; one result had no file name and its text came from a neighboring line, with a `:0:` column plain `grep` never prints.
+- **Truncated the match itself.** `grep -n "^export function bindingForShortsBar"` printed the line with the searched prefix cut off; other lines cut at ~80 chars with an ellipsis.
+
+Three of the five arrived with a `rtk: Failed to resolve 'rg' via PATH, falling back to direct exec` banner. Two came with **no banner at all** — the wrapper intervenes silently.
+
+**Same classes are open upstream** (all still open as of August 2026):
+
+- [#2301](https://github.com/rtk-ai/rtk/issues/2301) — the Claude Code hook rewrites `rg` into BSD-grep mode; path-less searches "silently return 0 matches"
+- [#2806](https://github.com/rtk-ai/rtk/issues/2806) — false negatives from `rtk rg`
+- [#3220](https://github.com/rtk-ai/rtk/issues/3220) — "TypeScript: No errors found" printed on a non-zero exit, so a `tsc` that never ran reads as a clean typecheck
+- [#2317](https://github.com/rtk-ai/rtk/issues/2317) — filters mask hard failures with benign summaries (a pytest collection error becomes "No tests collected")
+- [#3370](https://github.com/rtk-ai/rtk/issues/3370) — `rtk read --max-lines N` delivers N/2 lines
+- [#3339](https://github.com/rtk-ai/rtk/issues/3339) — inflated savings metric and "passthrough that doesn't pass through"
+
+**Why config can't fix it.** RTK still has no allowlist mode — requested in [#2231](https://github.com/rtk-ai/rtk/issues/2231), open since June 2026. The only scoping knob is an `exclude_commands` blacklist, so every command class has to burn you once before you can exclude it — and the passthrough path itself has broken (#3339). The economics are asymmetric: 60% off a `git diff` is worth far less than one fabricated match sending the agent to edit the wrong file, plus the review time to catch it.
+
+**Instead:** leave shell output raw. Claude Code already caps tool results, and real noise is cheaper to cut at the source — `git diff --stat`, `--quiet` / `--silent` test flags, `| head`, `| wc -l`, narrower paths. Zero fidelity risk.
+
+## Part VI — Installation
 
 ### Linux/macOS (bash)
 
 ```bash
-# RTK (https://github.com/rtk-ai/rtk)
-curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
-rtk init -g
-rtk init --show
-
-# Exclude known-broken filters from the RTK hook (see "RTK filters can lie").
-# Fresh install has no [hooks] section; if `rtk config` already shows one,
-# edit the file by hand instead of appending a duplicate section.
-RTK_CFG="$HOME/.config/rtk/config.toml"   # macOS: "$HOME/Library/Application Support/rtk/config.toml"
-mkdir -p "$(dirname "$RTK_CFG")"
-cat >> "$RTK_CFG" <<'EOF'
-
-[hooks]
-exclude_commands = [
-  "grep",          # 80-char truncation loses matches (rtk#1161)
-  "ls",            # returns literal "(empty)" (rtk#1418)
-  "curl",          # API/HTTP responses must arrive intact
-  "playwright",    # E2E output crushed to ~9 tokens (rtk#1125, rtk#690)
-  "pnpm --filter", # rtk misparses the --filter flag (rtk#259)
-  "biome",         # lint filter printed "No issues found" over real errors
-  "npx biome",
-]
-EOF
-rtk config                          # verify the [hooks] section is loaded
-rtk hook check "grep foo bar.txt"   # must print the command UNCHANGED
-
 # Codebase Memory (https://github.com/DeusData/codebase-memory-mcp)
 curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
 codebase-memory-mcp config set auto_index true
 codebase-memory-mcp config set auto_index_limit 50000
 
@@ -489,9 +485,6 @@ claude plugin install typescript-lsp@claude-plugins-official
 claude plugin install pyright-lsp@claude-plugins-official
 
 # Verify
-rtk --version
-rtk gain                          # must work; if it fails you likely have
-                                  # the wrong rtk ("Rust Type Kit" name collision)
 codebase-memory-mcp --version
 typescript-language-server --version
 pyright --version
@@ -515,7 +508,7 @@ claude plugin install ponytail@ponytail
 claude plugin marketplace add jarrodwatts/claude-hud
 claude plugin install claude-hud
 
-# Session Report (official; per-session token/cache/subagent/skill HTML report — see Part VI).
+# Session Report (official; per-session token/cache/subagent/skill HTML report — see Part VII).
 # Marketplace claude-plugins-official already added in the LSP step above.
 # Known cosmetic bug: a missing manifest can list its skill twice under different namespaces.
 claude plugin install session-report@claude-plugins-official
@@ -531,14 +524,14 @@ claude plugin install session-report@claude-plugins-official
 
 ### Windows 10+
 
-**Prerequisites:** PowerShell 7+ (`pwsh`), Node.js + npm on `PATH`, Claude Code CLI (`claude`). **Do NOT use the projects' `install.sh` scripts on Windows.**
+**Prerequisites:** PowerShell 7+ (`pwsh`), Node.js + npm on `PATH`, Claude Code CLI (`claude`). **Do NOT use the project's `install.sh` script on Windows.**
 
-> ⚠️ **Why not `bash … install.sh`:** on Windows `bash` usually resolves to **WSL** (or Git Bash). Under WSL the installer detects `os: linux`, downloads a **Linux** binary, and drops it inside the WSL filesystem (`/home/<user>/.local/bin/`) — invisible to and unrunnable by Windows-native Claude Code. Both projects publish real Windows `.zip` binaries (`codebase-memory-mcp-windows-amd64.zip`, `rtk-x86_64-pc-windows-msvc.zip`), so download those directly with PowerShell — no bash, no WSL, no Git Bash. Windows-on-ARM: swap `amd64`/`x86_64` for the `arm64`/`aarch64` assets.
+> ⚠️ **Why not `bash … install.sh`:** on Windows `bash` usually resolves to **WSL** (or Git Bash). Under WSL the installer detects `os: linux`, downloads a **Linux** binary, and drops it inside the WSL filesystem (`/home/<user>/.local/bin/`) — invisible to and unrunnable by Windows-native Claude Code. The project publishes a real Windows `.zip` binary (`codebase-memory-mcp-windows-amd64.zip`), so download that directly with PowerShell — no bash, no WSL, no Git Bash. Windows-on-ARM: swap `amd64` for the `arm64` asset.
 
 ```powershell
 # ── STEP 0: PATH + a helper that installs a GitHub Windows .zip binary ──
-# Both binaries live in ~/.local/bin (= %USERPROFILE%\.local\bin). PowerShell
-# won't see them until this dir is on PATH — session + persisted for the user.
+# The binary lives in ~/.local/bin (= %USERPROFILE%\.local\bin). PowerShell
+# won't see it until this dir is on PATH — session + persisted for the user.
 $bin = "$env:USERPROFILE\.local\bin"
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
 $env:PATH = "$bin;$env:PATH"
@@ -557,32 +550,6 @@ function Install-WinZipBinary($url, $exeGlob, $finalName) {
   if (-not $exe) { throw "no $exeGlob inside $url" }
   Copy-Item $exe.FullName -Destination (Join-Path $bin $finalName) -Force
 }
-
-# ── RTK (https://github.com/rtk-ai/rtk) ───────────────────────────────
-Install-WinZipBinary "https://github.com/rtk-ai/rtk/releases/latest/download/rtk-x86_64-pc-windows-msvc.zip" "rtk*.exe" "rtk.exe"
-rtk init -g
-rtk init --show
-
-# Exclude known-broken filters from the RTK hook (see "RTK filters can lie").
-# Fresh install has no [hooks] section; if `rtk config` already shows one,
-# edit %APPDATA%\rtk\config.toml by hand instead of appending a duplicate section.
-$rtkCfg = "$env:APPDATA\rtk\config.toml"
-New-Item -ItemType Directory -Force -Path (Split-Path $rtkCfg) | Out-Null
-@'
-
-[hooks]
-exclude_commands = [
-  "grep",          # 80-char truncation loses matches (rtk#1161)
-  "ls",            # returns literal "(empty)" (rtk#1418)
-  "curl",          # API/HTTP responses must arrive intact
-  "playwright",    # E2E output crushed to ~9 tokens (rtk#1125, rtk#690)
-  "pnpm --filter", # rtk misparses the --filter flag (rtk#259)
-  "biome",         # lint filter printed "No issues found" over real errors
-  "npx biome",
-]
-'@ | Add-Content -Path $rtkCfg
-rtk config                          # verify the [hooks] section is loaded
-rtk hook check "grep foo bar.txt"   # must print the command UNCHANGED
 
 # ── Codebase Memory (https://github.com/DeusData/codebase-memory-mcp) ──
 Install-WinZipBinary "https://github.com/DeusData/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-windows-amd64.zip" "codebase-memory-mcp*.exe" "codebase-memory-mcp.exe"
@@ -607,9 +574,6 @@ claude plugin install typescript-lsp@claude-plugins-official
 claude plugin install pyright-lsp@claude-plugins-official
 
 # ── Verify ────────────────────────────────────────────────────────────
-rtk --version
-rtk gain                          # must work; if it fails you likely have
-                                  # the wrong rtk ("Rust Type Kit" name collision)
 codebase-memory-mcp --version
 typescript-language-server --version
 pyright --version
@@ -635,7 +599,7 @@ claude plugin install ponytail@ponytail
 claude plugin marketplace add jarrodwatts/claude-hud
 claude plugin install claude-hud
 
-# ── Session Report (official; per-session token/cache HTML report — see Part VI) ──
+# ── Session Report (official; per-session token/cache HTML report — see Part VII) ──
 # Marketplace claude-plugins-official already added in the LSP step above.
 # Known cosmetic bug: a missing manifest can list its skill twice under different namespaces.
 claude plugin install session-report@claude-plugins-official
@@ -654,18 +618,11 @@ claude plugin install session-report@claude-plugins-official
 - **No `bash`/`install.sh`.** On Windows `bash` typically means WSL, whose `install.sh` fetches a Linux binary into the WSL VM — useless to Windows Claude Code. `Install-WinZipBinary` downloads the real Windows `.zip` (`Invoke-WebRequest` + `Expand-Archive`), finds the `.exe`, and drops it in `~/.local/bin` under a canonical name.
 - **`export PATH=…` → PowerShell.** The original bash `export PATH="$HOME/.local/bin:$PATH"` becomes STEP 0: `$env:PATH` for the current session plus `[Environment]::SetEnvironmentVariable(... "User")` to persist it. Open a new terminal after install so the persisted `PATH` is picked up.
 - Everything else (`npm`, `npx`, `claude …`) runs natively on Windows unchanged.
-- **RTK hook fidelity on Windows:** the Claude Code hook intermittently returns output not faithful to the real command — duplicated lines, spurious markup ([#2176](https://github.com/rtk-ai/rtk/issues/2176)). The exit-code-beats-summary rule matters doubly here; if it bites often, drop the global hook (`rtk init -g`) and wrap only trusted commands manually (`rtk git diff`).
 
 
-## Part VI — Measuring savings
+## Part VII — Measuring savings
 
-Don't trust vendor numbers — measure on your own workflow:
-
-```
-rtk gain              # shell-output savings (add --history for per-command log)
-```
-
-Inside a session:
+Don't trust vendor numbers — measure on your own workflow. Inside a session:
 
 ```
 /context   # what occupies the context window right now (incl. per-MCP-server cost)
@@ -673,17 +630,16 @@ Inside a session:
 /usage     # current usage against your plan / rate limits
 ```
 
-**Live status line — Claude HUD.** Instead of running `/context` on demand, [Claude HUD](https://github.com/jarrodwatts/claude-hud) keeps a context-fullness bar plus model, project path, git branch, and rate limits in the status line every turn — using Claude Code's native token data, not estimates (optional extra lines show tool/agent/todo activity). It's a monitoring aid, not a token saver. `/claude-hud:setup` runs a guided preset picker (Full/Essential/Minimal) and **overwrites the status line**, so install and set it up *after* Caveman, whose plugin sets its own — Claude HUD then wins. Requires Claude Code v1.0.80+ and Node 18+; install steps in Part V.
+**Live status line — Claude HUD.** Instead of running `/context` on demand, [Claude HUD](https://github.com/jarrodwatts/claude-hud) keeps a context-fullness bar plus model, project path, git branch, and rate limits in the status line every turn — using Claude Code's native token data, not estimates (optional extra lines show tool/agent/todo activity). It's a monitoring aid, not a token saver. `/claude-hud:setup` runs a guided preset picker (Full/Essential/Minimal) and **overwrites the status line**, so install and set it up *after* Caveman, whose plugin sets its own — Claude HUD then wins. Requires Claude Code v1.0.80+ and Node 18+; install steps in Part VI.
 
-**Cross-session forensics — Session Report.** [session-report](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/session-report) (official) reads the last week of transcripts under `~/.claude/projects` and drops a self-contained HTML report in the working directory: input/output tokens, cache efficiency and miss causes, the most expensive prompts, subagent and skill usage, and per-session spend — sortable tables and bar charts, plus a skill that surfaces which projects or skills eat disproportionate tokens and whether one prompt skews the totals. This is the layer that actually answers *did it pay off*: whether RTK cut total spend, whether Caveman nets a saving, whether Context7 fires only when needed, and whether codebase-memory-mcp really reduced Read/Grep. Install, `/reload-plugins`, then invoke its `session-report` skill (ask for a session report). Known cosmetic bug: a missing manifest can list the skill twice under different namespaces — harmless to the report, but it clutters the skills list. Install steps in Part V.
+**Cross-session forensics — Session Report.** [session-report](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/session-report) (official) reads the last week of transcripts under `~/.claude/projects` and drops a self-contained HTML report in the working directory: input/output tokens, cache efficiency and miss causes, the most expensive prompts, subagent and skill usage, and per-session spend — sortable tables and bar charts, plus a skill that surfaces which projects or skills eat disproportionate tokens and whether one prompt skews the totals. This is the layer that actually answers *did it pay off*: whether Caveman nets a saving, whether Context7 fires only when needed, and whether codebase-memory-mcp really reduced Read/Grep. Install, `/reload-plugins`, then invoke its `session-report` skill (ask for a session report). Known cosmetic bug: a missing manifest can list the skill twice under different namespaces — harmless to the report, but it clutters the skills list. Install steps in Part VI.
 
-**Rule:** enable one layer at a time, compare a week of `rtk gain` / `/cost` before and after, keep what pays for itself.
+**Rule:** enable one layer at a time, compare a week of `/cost` and Session Report before and after, keep what pays for itself.
 
 ## Summary
 
 | Tool | Owns | Expected effect |
 | --- | --- | --- |
-| RTK | shell, tests, Git, logs | 30–98% on noisy commands [measured] |
 | codebase-memory-mcp | structural code navigation | ~10× on exploration, −9pp answer quality [study] |
 | ast-grep (CLI — no MCP or plugin surface) | syntax-pattern search, bulk codemods | matches instead of file reads; the CLI edits, the model doesn't [proxy] |
 | TypeScript / Python LSP | definitions, references, type errors | replaces multi-KB grep+read chains [proxy] |
@@ -693,6 +649,7 @@ Inside a session:
 | Claude HUD (status-line plugin) | live context/cost/rate-limit visibility | no direct token savings — monitoring aid; overrides the status line |
 | Session Report (official plugin) | forensic per-session token/cache/subagent/skill report | measurement — proves whether each layer nets out |
 | Browser MCP (Playwright *or* Chrome DevTools, one at a time) | frontend testing / perf-network debugging | toggle per task — idle server is tool-surface tax, snapshots cost 10k+ tokens |
+| ~~RTK~~ (**not recommended** — Part V) | shell-output compression | rewrites what the agent sees; fabricated and dropped matches [measured] |
 
 ---
 
@@ -702,7 +659,7 @@ Three guides, one split — pick the layer you need:
 
 - [Awesome AGENTS.md](https://github.com/khasky/awesome-agents-md) — the base, tool-agnostic ruleset every agent imports (one `AGENTS.md`). Token optimization sits on top of it.
 - [Awesome Agent Skills](https://github.com/khasky/awesome-agent-skills) — portable `SKILL.md` skills every agent loads: code review, debugging, security and leak audits, code and text cleanup.
-- **Claude Code Token Optimization** — *this repo:* the token-efficiency layer (RTK, LSP, Context7, `codebase-memory-mcp`, Caveman, Ponytail).
+- **Claude Code Token Optimization** — *this repo:* the token-efficiency layer (LSP, `codebase-memory-mcp`, ast-grep, Context7, Caveman, Ponytail).
 - [Agent MCP Integrations](https://github.com/khasky/agent-mcp-integrations) — MCP servers that connect agents to browsers, cloud, databases, infra, and domain APIs; the two browser servers referenced here are covered there in full.
 - [Claude Code Security Audit](https://github.com/khasky/claude-code-security-audit) — the layered security-audit workflow (deep audit, continuous guardrails, scanners).
 
@@ -710,4 +667,4 @@ Three guides, one split — pick the layer you need:
 
 ## License
 
-Released under the [MIT license](LICENSE). The community tools this guide installs — RTK, codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7, Claude HUD — keep their own licenses; check each project before use.
+Released under the [MIT license](LICENSE). The community tools this guide installs — codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7, Claude HUD — keep their own licenses; check each project before use.
