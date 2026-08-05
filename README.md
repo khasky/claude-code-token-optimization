@@ -26,6 +26,7 @@ Then a short list of tools **not** worth installing, installation for Linux/macO
   - [2. Subagents as "dirty context" isolators](#2-subagents-as-dirty-context-isolators)
   - [3. /compact, /clear, and short tasks](#3-compact-clear-and-short-tasks)
   - [4. Disable unused MCP servers & plugins, keep `CLAUDE.md` lean](#4-disable-unused-mcp-servers--plugins-keep-claudemd-lean)
+  - [Protect the cached prefix](#protect-the-cached-prefix)
 - [Part II — Input-side tooling](#part-ii--input-side-tooling)
   - [5. codebase-memory-mcp — code-graph navigation](#5-codebase-memory-mcp--code-graph-navigation)
   - [6. ast-grep — structural search and controlled codemods](#6-ast-grep--structural-search-and-controlled-codemods)
@@ -139,6 +140,23 @@ Same class of problem: `CLAUDE.md`, hooks, and rules text ride along with **ever
 | **Chrome DevTools MCP** | network, console errors, performance, source maps, runtime profiling, layout/rendering analysis |
 
 Route by task: frontend feature → **Playwright**; performance/network investigation → **Chrome DevTools**; backend or refactor → **both off**. Toggle per session in `/mcp`.
+
+### Protect the cached prefix
+
+The lines `/context` prints are not just size — they are also position, and position is what decides whether you pay full price for them again on the next turn.
+
+Prompt caching on the Messages API underneath is a **prefix match**. The request renders in a fixed order — tools, then system, then messages — and a cache entry is reusable only up to the first byte that differs. Cached tokens are read at roughly **one tenth** of the input price; writing the cache costs about **1.25×** normal input (5-minute TTL) or **2×** (1-hour TTL), so a prefix that survives two turns has already paid for itself and one that never survives is pure overhead.
+
+The consequences are unintuitive, and they are all about *when* you change things:
+
+- **Toggling an MCP server mid-session is not free.** Tools render first, so adding or removing one changes byte zero and invalidates everything behind it — system prompt, `CLAUDE.md`, and the entire conversation. Decide the server set at the start of a task, not opportunistically in the middle.
+- **Editing `CLAUDE.md` mid-session costs the whole conversation.** It sits in the prefix ahead of every message. The edit is nearly free at session start and expensive at message forty.
+- **A long stable `CLAUDE.md` can be cheaper than a short volatile one.** After the first turn it is served at cache-read rates. What actually hurts is content that varies — a timestamp, a session id, anything interpolated per run — because it moves the boundary and everything after it is reprocessed at full price.
+- **`/clear` between unrelated tasks is the cheap move; switching models is not.** Caches are per-model, so a model switch starts from cold no matter how stable your prefix is.
+
+Session Report's "cache efficiency and miss causes" (Part VII) is where you check this. Persistent misses on a session whose configuration you did not touch mean something in the prefix is varying — find it, because that one string is repricing your entire context on every message.
+
+**One measurement note:** do not size prompts with `tiktoken` or any GPT tokenizer. It is a different tokenizer and it undercounts Claude by roughly 15–20% on prose, considerably more on code and non-English text. Use `/context` inside a session, or the API's `count_tokens` endpoint with the model you actually run.
 
 ## Part II — Input-side tooling
 
