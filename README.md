@@ -1,6 +1,6 @@
 # Claude Code: Token Optimization & Context Management
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Web Reactions](https://api.webreactions.app/badge/github/khasky/claude-code-token-optimization.svg)](https://webreactions.app/?utm_source=github&utm_channel=repository&utm_medium=claude-code-token-optimization)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Emojery](https://api.emojery.app/badge/github/khasky/claude-code-token-optimization.svg)](https://emojery.app/react?t=github/khasky/claude-code-token-optimization)
 
 A practical guide to keeping Claude Code sessions cheap: what actually occupies the context window, which layers cut input, output, and cross-session cost, and how to prove each one pays for itself before you keep it.
 
