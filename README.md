@@ -15,7 +15,7 @@ The tools split into four layers, each with its own token pool:
 
 Then a short list of tools **not** worth installing, installation for Linux/macOS and Windows, and a measurement layer (`/context`, `/cost`, Session Report) so you enable one thing at a time and keep only what earns its place.
 
-> **Trust & scope note.** Except the official Anthropic plugins (the LSP connectors and Session Report), everything below is community-built (codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7, Claude HUD) — not Anthropic products. Review any `curl | sh` install script before running it.
+> **Trust & scope note.** Except the official Anthropic plugins (the LSP connectors and Session Report), everything below is community-built (codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7) — not Anthropic products. Review any `curl | sh` install script before running it.
 
 ---
 
@@ -38,6 +38,7 @@ Then a short list of tools **not** worth installing, installation for Linux/macO
   - [10. Context7](#10-context7)
 - [Part V — Tools I don't recommend](#part-v--tools-i-dont-recommend)
   - [11. RTK — shell-output compression](#11-rtk--shell-output-compression)
+  - [12. Claude HUD — a status line that re-runs every turn](#12-claude-hud--a-status-line-that-re-runs-every-turn)
 - [Part VI — Installation](#part-vi--installation)
   - [Linux/macOS (bash)](#linuxmacos-bash)
   - [Windows 10+](#windows-10)
@@ -446,7 +447,7 @@ Context7 fetches current, version-specific library documentation on demand inste
 
 ## Part V — Tools I don't recommend
 
-Popular token-savers that cost more than they save. The failure mode that matters is not "saves less than advertised" — it's a tool that changes what the agent *sees*, because then a defect is indistinguishable from the truth and the agent acts on fiction.
+Popular token-savers that cost more than they save, plus one monitoring aid whose bill arrives in CPU. The failure mode that matters is not "saves less than advertised" — it's a tool that changes what the agent *sees*, because then a defect is indistinguishable from the truth and the agent acts on fiction. The second failure mode is quieter: a cost no token counter reports, so nothing in `/cost` or Session Report ever flags it.
 
 ### 11. RTK — shell-output compression
 
@@ -474,6 +475,26 @@ Three of the five arrived with a `rtk: Failed to resolve 'rg' via PATH, falling 
 **Why config can't fix it.** RTK still has no allowlist mode — requested in [#2231](https://github.com/rtk-ai/rtk/issues/2231), open since June 2026. The only scoping knob is an `exclude_commands` blacklist, so every command class has to burn you once before you can exclude it — and the passthrough path itself has broken (#3339). The economics are asymmetric: 60% off a `git diff` is worth far less than one fabricated match sending the agent to edit the wrong file, plus the review time to catch it.
 
 **Instead:** leave shell output raw. Claude Code already caps tool results, and real noise is cheaper to cut at the source — `git diff --stat`, `--quiet` / `--silent` test flags, `| head`, `| wc -l`, narrower paths. Zero fidelity risk.
+
+### 12. Claude HUD — a status line that re-runs every turn
+
+[Claude HUD](https://github.com/jarrodwatts/claude-hud) renders context fullness, model, project path, git branch, and rate limits into the status line. It costs no tokens; the price is machine time, paid on every render, in every open session.
+
+`/claude-hud:setup` writes a `statusLine` entry into `~/.claude/settings.json`: a shell pipeline that re-resolves the plugin directory, then execs the HUD. Claude Code re-runs that whole command on every status-line refresh — a new assistant message, a finished `/compact`, a permission-mode change, a vim-mode toggle. `refreshInterval`, the plugin's documented fix for timers going stale between messages, adds timer-driven renders on top of those.
+
+**Measured** (Windows 10, 16 logical cores, claude-hud 0.6.0, the command exactly as `/claude-hud:setup` left it):
+
+```text
+shell wrapper (bash + stty + awk + ls + sort + tail)   ~110 ms   6 processes
+node dist/index.js                                     ~300 ms   1 process
+one render                                             ~410 ms   ~7 processes
+```
+
+At one render per second, six concurrent sessions spend 2.5 of 16 logical cores drawing a status line. None of it appears as a culprit in a process monitor: every process lives 400 ms and exits, so the symptom is 100% CPU, a 220-process tree, and no visible hog.
+
+The shell wrapper is the Windows-heavy half — 110 ms for six spawns there, less on Linux and macOS — while the 300 ms of Node is not platform-specific. Current Claude Code sets `COLUMNS` natively, so the `stty`/`awk` width probe inside that wrapper is a legacy fallback for older versions: dead weight on every render.
+
+**Instead:** run `/context` and `/cost` when you want the numbers — between calls they cost nothing. If you want the HUD anyway, keep one session open rather than six, leave `refreshInterval` unset, and remember `CLAUDE_HUD_DISABLE=1` suppresses it per launch without touching `settings.json`.
 
 ## Part VI — Installation
 
@@ -520,12 +541,6 @@ claude plugin install caveman@caveman
 claude plugin marketplace add DietrichGebert/ponytail
 claude plugin install ponytail@ponytail
 
-# Claude HUD (https://github.com/jarrodwatts/claude-hud) — live context/cost/git in the status line.
-# Install LAST: /claude-hud:setup (run below) overwrites the status line, so it must come after
-# Caveman — whose plugin sets its own — for Claude HUD's to win. Needs Claude Code v1.0.80+, Node 18+.
-claude plugin marketplace add jarrodwatts/claude-hud
-claude plugin install claude-hud
-
 # Session Report (official; per-session token/cache/subagent/skill HTML report — see Part VII).
 # Marketplace claude-plugins-official already added in the LSP step above.
 # Known cosmetic bug: a missing manifest can list its skill twice under different namespaces.
@@ -537,7 +552,6 @@ claude plugin install session-report@claude-plugins-official
 /mcp
 /plugin
 /caveman lite
-/claude-hud:setup   # guided status-line preset; run after /reload-plugins so it overrides
 ```
 
 ### Windows 10+
@@ -610,13 +624,6 @@ claude plugin install caveman@caveman
 claude plugin marketplace add DietrichGebert/ponytail
 claude plugin install ponytail@ponytail
 
-# ── Claude HUD (https://github.com/jarrodwatts/claude-hud) ────────────
-# Live context/cost/git in the status line. Install LAST: /claude-hud:setup (run below)
-# overwrites the status line, so it must come after Caveman — whose plugin sets its own —
-# for Claude HUD's to win. Needs Claude Code v1.0.80+, Node 18+.
-claude plugin marketplace add jarrodwatts/claude-hud
-claude plugin install claude-hud
-
 # ── Session Report (official; per-session token/cache HTML report — see Part VII) ──
 # Marketplace claude-plugins-official already added in the LSP step above.
 # Known cosmetic bug: a missing manifest can list its skill twice under different namespaces.
@@ -628,7 +635,6 @@ claude plugin install session-report@claude-plugins-official
 /mcp
 /plugin
 /caveman lite
-/claude-hud:setup   # guided status-line preset; run after /reload-plugins so it overrides
 ```
 
 #### Windows notes
@@ -648,7 +654,7 @@ Don't trust vendor numbers — measure on your own workflow. Inside a session:
 /usage     # current usage against your plan / rate limits
 ```
 
-**Live status line — Claude HUD.** Instead of running `/context` on demand, [Claude HUD](https://github.com/jarrodwatts/claude-hud) keeps a context-fullness bar plus model, project path, git branch, and rate limits in the status line every turn — using Claude Code's native token data, not estimates (optional extra lines show tool/agent/todo activity). It's a monitoring aid, not a token saver. `/claude-hud:setup` runs a guided preset picker (Full/Essential/Minimal) and **overwrites the status line**, so install and set it up *after* Caveman, whose plugin sets its own — Claude HUD then wins. Requires Claude Code v1.0.80+ and Node 18+; install steps in Part VI.
+A status-line HUD turns those on-demand calls into a command that re-runs every turn; the CPU arithmetic is in Part V §12.
 
 **Cross-session forensics — Session Report.** [session-report](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/session-report) (official) reads the last week of transcripts under `~/.claude/projects` and drops a self-contained HTML report in the working directory: input/output tokens, cache efficiency and miss causes, the most expensive prompts, subagent and skill usage, and per-session spend — sortable tables and bar charts, plus a skill that surfaces which projects or skills eat disproportionate tokens and whether one prompt skews the totals. This is the layer that actually answers *did it pay off*: whether Caveman nets a saving, whether Context7 fires only when needed, and whether codebase-memory-mcp really reduced Read/Grep. Install, `/reload-plugins`, then invoke its `session-report` skill (ask for a session report). Known cosmetic bug: a missing manifest can list the skill twice under different namespaces — harmless to the report, but it clutters the skills list. Install steps in Part VI.
 
@@ -664,7 +670,6 @@ Don't trust vendor numbers — measure on your own workflow. Inside a session:
 | Context7 | fresh library docs | indirect — fewer retry loops |
 | Caveman (enable/disable on purpose) | terse agent replies | ~65% of output tokens [measured] |
 | Ponytail (enable/disable on purpose) | minimal code output | ~70% less code on local A/B [measured] |
-| Claude HUD (status-line plugin) | live context/cost/rate-limit visibility | no direct token savings — monitoring aid; overrides the status line |
 | Session Report (official plugin) | forensic per-session token/cache/subagent/skill report | measurement — proves whether each layer nets out |
 | Browser MCP (Playwright *or* Chrome DevTools, one at a time) | frontend testing / perf-network debugging | toggle per task — idle server is tool-surface tax, snapshots cost 10k+ tokens |
 ---
@@ -683,4 +688,4 @@ Three guides, one split — pick the layer you need:
 
 ## License
 
-Released under the [MIT license](LICENSE). The community tools this guide installs — codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7, Claude HUD — keep their own licenses; check each project before use.
+Released under the [MIT license](LICENSE). The community tools this guide installs — codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7 — keep their own licenses; check each project before use.
