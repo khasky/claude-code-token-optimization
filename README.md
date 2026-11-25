@@ -8,12 +8,12 @@ A practical guide to keeping Claude Code sessions cheap: what actually occupies 
 
 The tools split into four layers, each with its own token pool:
 
-- **Built-in practices** — LSP navigation, dirty-context subagents, disciplined `/compact` and `/clear`, and pruning MCP/plugin surface. No installs, biggest wins.
+- **Built-in practices** — effort level and model choice, LSP navigation, dirty-context subagents, disciplined `/compact`, `/rewind` and `/clear`, and pruning MCP/plugin surface. No installs, biggest wins.
 - **Input-side tooling** — a code-graph navigation layer (codebase-memory-mcp) and ast-grep for structural search plus codemods the CLI performs instead of the model.
-- **Output-side plugins** — Caveman (terse prose) and Ponytail (minimal code), acting on disjoint parts of the reply.
+- **Output-side plugins** — Caveman (terse prose) and Ponytail (minimal code), acting on disjoint parts of the reply. Opt-in: on current models they shorten the reply and still cost more per short task.
 - **Docs on demand** — Context7, to stop the model hallucinating stale APIs.
 
-Then a short list of tools **not** worth installing, installation for Linux/macOS and Windows, and a measurement layer (`/context`, `/cost`, Session Report) so you enable one thing at a time and keep only what earns its place.
+Then a short list of tools **not** worth installing, installation for Linux/macOS and Windows, and a measurement layer (`/context`, `/usage`, Session Report) so you enable one thing at a time and keep only what earns its place.
 
 > **Trust & scope note.** Except the official Anthropic plugins (the LSP connectors and Session Report), everything below is community-built (codebase-memory-mcp, ast-grep, Caveman, Ponytail, Context7) — not Anthropic products. Review any `curl | sh` install script before running it.
 
@@ -22,6 +22,7 @@ Then a short list of tools **not** worth installing, installation for Linux/macO
 ## Table of Contents
 
 - [Part I — Built-in practices](#part-i--built-in-practices)
+  - [Effort level and model choice](#effort-level-and-model-choice)
   - [1. LSP plugin — the first thing to add](#1-lsp-plugin--the-first-thing-to-add)
   - [2. Subagents as "dirty context" isolators](#2-subagents-as-dirty-context-isolators)
   - [3. /compact, /clear, and short tasks](#3-compact-clear-and-short-tasks)
@@ -30,6 +31,7 @@ Then a short list of tools **not** worth installing, installation for Linux/macO
 - [Part II — Input-side tooling](#part-ii--input-side-tooling)
   - [5. codebase-memory-mcp — code-graph navigation](#5-codebase-memory-mcp--code-graph-navigation)
   - [6. ast-grep — structural search and controlled codemods](#6-ast-grep--structural-search-and-controlled-codemods)
+  - [context-mode — a candidate, not a default](#context-mode--a-candidate-not-a-default)
   - [7. What to choose](#7-what-to-choose)
 - [Part III — Output-side plugins](#part-iii--output-side-plugins)
   - [8. Caveman — terse replies](#8-caveman--terse-replies)
@@ -48,6 +50,23 @@ Then a short list of tools **not** worth installing, installation for Linux/macO
 - [License](#license)
 
 ## Part I — Built-in practices
+
+### Effort level and model choice
+
+Two session settings move the bill more than any plugin, and both are built in.
+
+**Effort.** Fable models, Opus 5.5, Sonnet 5.5 and Haiku 5.5 always think: thinking cannot be turned off, and thinking tokens are billed as output. The effort level is what scales it. The levels are `low`, `medium`, `high`, `xhigh` and `max`; Fable 5.2 and the 5.5 models default to `medium` ([model configuration](https://code.claude.com/docs/en/model-config#adjust-effort-level)).
+
+| Level | Use it for |
+| --- | --- |
+| `low` | quick exchanges you review yourself: a rename, a first sketch |
+| `medium` | day-to-day work with a clear scope |
+| `high` | a bug in an existing codebase, anything where edge cases are likely |
+| `xhigh`, `max` | hard problems the agent works through alone; `max` is prone to overthinking, so test it before adopting it |
+
+Set it with `/effort <level>` in a session, `claude --effort <level>` for one launch, the `CLAUDE_CODE_EFFORT_LEVEL` environment variable, or `effort` in a skill's or subagent's frontmatter. With an API key or a Claude subscription, changing effort mid-session keeps the prompt cache on Fable 5.1 and later and on the 5.5 models, so dropping a level for a routine stretch costs nothing.
+
+**Model.** Sonnet handles most coding tasks and costs less than Opus; keep Opus for architecture decisions and multi-step reasoning. A model switch mid-session is the expensive kind of change: each model has its own cache, so the next request rereads the whole conversation uncached. Pick the model at the start of a task. Simple subagents take `model: haiku` in their definition (§2).
 
 ### 1. LSP plugin — the first thing to add
 
@@ -89,6 +108,8 @@ The subagent gets its own context window; only the short summary returns to the 
 
 ⚠️ **Don't use subagents for every small operation:** each one has its own startup context, tools, and instructions. They save *main* context, but not necessarily *total* tokens.
 
+A subagent's requests are billed like any others. Put read-only exploration on a smaller model with `model: haiku` in the subagent definition. Its cache lives five minutes even on a subscription, where the main conversation gets an hour (see Protect the cached prefix).
+
 ### 3. /compact, /clear, and short tasks
 
 Context accumulates junk faster than any tool trims it. Compact with explicit instructions:
@@ -101,8 +122,11 @@ exploratory dead ends, repeated file contents.
 ```
 
 - Compaction instructions can also live in `CLAUDE.md`.
-- For unrelated tasks use `/clear` — stale context is paid for and reprocessed with every message.
+- Compact at a natural break, while the cache is warm. The summary request rereads the conversation: from cache that is a fraction of the context's size, after a break longer than the cache lifetime it is the whole history at full input price. Resuming an old session and compacting it first is the most expensive order.
+- A dead end you want to drop entirely → `/rewind` to the turn before it. Rewinding truncates back to a prefix that is already cached; compaction builds a new one.
+- For unrelated tasks use `/clear` — it costs nothing, while stale context is reprocessed with every message.
 - After several failed approaches, a **fresh session with a good short brief** beats compressing old junk again (see managing costs).
+- A 1M-context model fills a long way before automatic compaction. `/autocompact <tokens>` (for example `/autocompact 500k`) sets the window yourself; `/autocompact auto` returns to the model's default.
 
 ### 4. Disable unused MCP servers & plugins, keep `CLAUDE.md` lean
 
@@ -146,16 +170,32 @@ Route by task: frontend feature → **Playwright**; performance/network investig
 
 The lines `/context` prints are not just size — they are also position, and position is what decides whether you pay full price for them again on the next turn.
 
-Prompt caching on the Messages API underneath is a **prefix match**. The request renders in a fixed order — tools, then system, then messages — and a cache entry is reusable only up to the first byte that differs. Cached tokens are read at roughly **one tenth** of the input price; writing the cache costs about **1.25×** normal input (5-minute TTL) or **2×** (1-hour TTL), so a prefix that survives two turns has already paid for itself and one that never survives is pure overhead.
+Prompt caching on the Messages API underneath is a **prefix match**. Claude Code orders every request so the parts that rarely change come first — system prompt and tool definitions, then project context (`CLAUDE.md`, auto memory, unscoped rules), then the conversation — and a cache entry is reusable only up to the first byte that differs. Cached tokens are read at roughly **one tenth** of the input price; writing the cache costs about **1.25×** normal input (5-minute TTL) or **2×** (1-hour TTL), so a prefix that survives two turns has already paid for itself and one that never survives is pure overhead.
 
-The consequences are unintuitive, and they are all about *when* you change things:
+Which mid-session actions cost a full reread is not intuitive ([prompt caching in Claude Code](https://code.claude.com/docs/en/prompt-caching)).
 
-- **Toggling an MCP server mid-session is not free.** Tools render first, so adding or removing one changes byte zero and invalidates everything behind it — system prompt, `CLAUDE.md`, and the entire conversation. Decide the server set at the start of a task, not opportunistically in the middle.
-- **Editing `CLAUDE.md` mid-session costs the whole conversation.** It sits in the prefix ahead of every message. The edit is nearly free at session start and expensive at message forty.
-- **A long stable `CLAUDE.md` can be cheaper than a short volatile one.** After the first turn it is served at cache-read rates. What actually hurts is content that varies — a timestamp, a session id, anything interpolated per run — because it moves the boundary and everything after it is reprocessed at full price.
-- **`/clear` between unrelated tasks is the cheap move; switching models is not.** Caches are per-model, so a model switch starts from cold no matter how stable your prefix is.
+**These reread the conversation uncached on the next request:**
 
-Session Report's "cache efficiency and miss causes" (Part VII) is where you check this. Persistent misses on a session whose configuration you did not touch mean something in the prefix is varying — find it, because that one string is repricing your entire context on every message.
+- **Switching models.** Each model has its own cache. `opusplan` switches on every plan-mode toggle, and a skill or command whose `model` differs from the session's is a switch for that turn.
+- **Turning fast mode on or off.** The two speeds keep separate caches.
+- **`/compact`.** The conversation layer is replaced and project context is rebuilt with it (§3 for when that is cheap).
+- **Changing effort** on models older than Fable 5.1 and the 5.5 family, and on Amazon Bedrock, Google Cloud's Agent Platform or a gateway.
+- **Adding or removing a tool definition while tool search is off or unavailable:** an MCP server connecting, a server disabled in `/mcp`, a deny rule on a bare tool name.
+- **Upgrading Claude Code.** The first conversation after the restart builds its cache from the top.
+
+**These keep the cache:**
+
+- **Connecting or disabling an MCP server with tool search on,** the default on supported models. The tool list from the conversation's first request is kept for the whole conversation, and a server that connects later supplies its tools as deferred definitions.
+- **Editing `CLAUDE.md`.** Claude Code reads the project-root and user-level files at session start and holds them in memory. A mid-session edit is not applied and not charged until `/clear`, `/compact` or a restart.
+- **Changing effort** on Fable 5.1 and later, Opus 5.5, Sonnet 5.5 and Haiku 5.5, with an API key or a Claude subscription.
+- **Invoking a skill, entering plan mode, switching permission mode or output style, `/recap`, `/rewind`, spawning a subagent.** Each appends to the conversation or leaves the request alone.
+- **A plugin's skills, commands, agents and hooks.** Their content is appended after the conversation. A plugin's MCP servers follow the MCP rule above.
+
+A long stable `CLAUDE.md` is served at cache-read rates after the first turn: its price is the size it adds to every request, never a reprice of the conversation.
+
+**Cache lifetime.** A cached prefix expires after a period of inactivity, and the first message after the gap reprocesses the whole context. On a Claude subscription within plan usage the main conversation gets a one-hour TTL. With an API key, usage credits or a cloud provider it gets five minutes, and subagents get five minutes everywhere. The `promptCacheTtl` and `subagentPromptCacheTtl` settings (`5m` or `1h`, Claude Code 2.1.242 or later) choose it yourself: an hour pays off when you step away and come back, and costs the higher write rate on bursts that never idle past five minutes.
+
+`/usage` is where you check this. Its `Prompt cache (main)` line gives the share of input read from cache, the miss count, and the likely cause of the last miss when Claude Code can name one (`likely cause: tool definitions changed`). Persistent misses on a session whose configuration you did not touch mean something in the prefix is varying — find it, because that one string is repricing your entire context on every message.
 
 **One measurement note:** do not size prompts with `tiktoken` or any GPT tokenizer. It is a different tokenizer and it undercounts Claude by roughly 15–20% on prose, considerably more on code and non-English text. Use `/context` inside a session, or the API's `count_tokens` endpoint with the model you actually run.
 
@@ -174,6 +214,8 @@ Its win is preventive: unnecessary grep/read commands never run, so their output
 **Benchmark:**
 
 - **[study]** 31 real-world repos (arXiv:2603.27277): **~10× fewer tokens**, **2.1× fewer tool calls** than file exploration. Trade-off: **83% answer quality vs 92%** for the file-exploration agent — graph-first is cheaper, but the agent sometimes still needs to check source code.
+
+**The installer adds more than a server.** `install.sh` ends by running `codebase-memory-mcp install`, which for Claude Code registers the MCP server (17 tools) plus a skill, three graph agents and hooks: `SessionStart`, `SubagentStart`, `PreToolUse` on `Grep`/`Glob`/`Bash`, and a coverage note after `Read`. The hooks are on by default and inject graph context into the session, the per-turn tax §4 warns about. `codebase-memory-mcp install --no-hooks` removes them and keeps the MCP registration, and the choice persists across updates. Start without hooks; turn them on only if `/usage` shows the agent still exploring with grep.
 
 **Git worktrees: every worktree is its own project**
 
@@ -331,6 +373,18 @@ Run one rule with `npx ast-grep scan --rule rules/no-console-log.yml src`, all o
 
 **Benchmark:** no vendor token number. The mechanism is the same as LSP's — matches replace file reads, and the CLI does the editing instead of the model [proxy].
 
+### context-mode — a candidate, not a default
+
+[context-mode](https://github.com/mksglu/context-mode) targets the pool nothing above touches: bulky tool output. Hooks redirect large reads, fetches and build or test runs into a local sandbox, the full output goes into a per-project SQLite index, and the agent gets back only what a script prints or a search matches.
+
+It stays out of the stack above for three reasons:
+
+- **The headline number is bytes, not tokens or dollars.** The README's 99.4% is a median over the author's own fixtures of 10 KB and larger. The one independent comparison that lists it ([ComputingForGeeks](https://computingforgeeks.com/reduce-claude-code-token-usage-tools/), April 2026) verified the install and ran no benchmark.
+- **It changes what the agent sees,** the concern that rules out RTK (Part V §11). The raw output is kept and searchable where RTK rewrites it, so a doubt can be checked; whether the agent does check is the thing to watch.
+- **Terms and trust.** The license is Elastic 2.0, source-available and not open source, and `ctx_execute` runs code on the host as your user.
+
+Worth a trial when the expensive lines in `/usage` are logs, long test runs and fetched pages, not navigation. Run it under the Part VII rule: alone, for a week, against a baseline.
+
 ### 7. What to choose
 
 **Add codebase-memory-mcp when:** the main cost is Read/Grep/Glob; large repo or monorepo; agent keeps re-exploring call chains; you use both Claude Code and Codex; the goal is total token reduction. On a small repo where navigation isn't the main cost, the built-in practices in Part I already cover most of the noise.
@@ -349,6 +403,21 @@ They barely conflict, so combine them with a clear split of responsibilities:
 Both act before the model reads anything, so they don't compete: one answers *where is the code*, the other *rewrite this construct everywhere*. Shell output stays raw on purpose — see Part V.
 
 ## Part III — Output-side plugins
+
+On Fable and the 5.5 models the first output lever is the effort level (Part I): thinking is billed as output and no style plugin touches it. The two plugins below shorten what is left, the visible prose and the generated code.
+
+**Benchmark on current models.** The [silverback benchmark](https://github.com/khasky/silverback#benchmark) runs each plugin alone on seeded tasks (Claude Code 2.1.289, `--effort low`, 5 attempts per task). Held-out split, per task:
+
+| | baseline | Caveman | Ponytail |
+| --- | --: | --: | --: |
+| `claude-opus-5-5`, words in the answer | 100 | 80 | 82 |
+| `claude-opus-5-5`, source lines on open requests | 49 | 62 | 28 |
+| `claude-opus-5-5`, cost | $0.095 | $0.131 | $0.116 |
+| `claude-sonnet-5-5`, words in the answer | 77 | 50 | 75 |
+| `claude-sonnet-5-5`, source lines on open requests | 47 | 47 | 28 |
+| `claude-sonnet-5-5`, cost | $0.052 | $0.068 | $0.064 |
+
+Both do what they claim: Caveman cuts words, Ponytail cuts lines. Both also cost more per task than no plugin. The tasks are short, so each one pays for the plugin's injected instructions and saves little output. Treat both as opt-in for long, output-heavy sessions, and keep either only if a week of `/usage` says it nets out (Part VII). A ruleset that already asks for terse replies and minimal diffs covers both pools in one injected text (silverback in the same benchmark on `claude-opus-5-5`: 57 words, 20 lines, $0.130); don't stack the plugins on top of it.
 
 ### 8. Caveman — terse replies
 
@@ -447,7 +516,7 @@ Context7 fetches current, version-specific library documentation on demand inste
 
 ## Part V — Tools I don't recommend
 
-Popular token-savers that cost more than they save, plus one monitoring aid whose bill arrives in CPU. The failure mode that matters is not "saves less than advertised" — it's a tool that changes what the agent *sees*, because then a defect is indistinguishable from the truth and the agent acts on fiction. The second failure mode is quieter: a cost no token counter reports, so nothing in `/cost` or Session Report ever flags it.
+Popular token-savers that cost more than they save, plus one monitoring aid whose bill arrives in CPU. The failure mode that matters is not "saves less than advertised" — it's a tool that changes what the agent *sees*, because then a defect is indistinguishable from the truth and the agent acts on fiction. The second failure mode is quieter: a cost no token counter reports, so nothing in `/usage` or Session Report ever flags it.
 
 ### 11. RTK — shell-output compression
 
@@ -474,7 +543,7 @@ Three of the five arrived with a `rtk: Failed to resolve 'rg' via PATH, falling 
 
 **Why config can't fix it.** RTK still has no allowlist mode — requested in [#2231](https://github.com/rtk-ai/rtk/issues/2231), open since June 2026. The only scoping knob is an `exclude_commands` blacklist, so every command class has to burn you once before you can exclude it — and the passthrough path itself has broken (#3339). The economics are asymmetric: 60% off a `git diff` is worth far less than one fabricated match sending the agent to edit the wrong file, plus the review time to catch it.
 
-**Instead:** leave shell output raw. Claude Code already caps tool results, and real noise is cheaper to cut at the source — `git diff --stat`, `--quiet` / `--silent` test flags, `| head`, `| wc -l`, narrower paths. Zero fidelity risk.
+**Instead:** leave shell output raw. Claude Code already caps tool results, and real noise is cheaper to cut at the source — `git diff --stat`, `--quiet` / `--silent` test flags, `| head`, `| wc -l`, narrower paths. Zero fidelity risk. A `PreToolUse` hook that appends `| tail -n 100` to a test command automates the same idea ([example in managing costs](https://code.claude.com/docs/en/costs#offload-processing-to-hooks-and-skills)): it narrows the command in plain sight and leaves the output it returns untouched.
 
 ### 12. Claude HUD — a status line that re-runs every turn
 
@@ -494,7 +563,7 @@ At one render per second, six concurrent sessions spend 2.5 of 16 logical cores 
 
 The shell wrapper is the Windows-heavy half — 110 ms for six spawns there, less on Linux and macOS — while the 300 ms of Node is not platform-specific. Current Claude Code sets `COLUMNS` natively, so the `stty`/`awk` width probe inside that wrapper is a legacy fallback for older versions: dead weight on every render.
 
-**Instead:** run `/context` and `/cost` when you want the numbers — between calls they cost nothing. If you want the HUD anyway, keep one session open rather than six, leave `refreshInterval` unset, and remember `CLAUDE_HUD_DISABLE=1` suppresses it per launch without touching `settings.json`.
+**Instead:** run `/context` and `/usage` when you want the numbers — between calls they cost nothing. If you want the HUD anyway, keep one session open rather than six, leave `refreshInterval` unset, and remember `CLAUDE_HUD_DISABLE=1` suppresses it per launch without touching `settings.json`.
 
 ## Part VI — Installation
 
@@ -504,6 +573,7 @@ The shell wrapper is the Windows-heavy half — 110 ms for six spawns there, les
 # Codebase Memory (https://github.com/DeusData/codebase-memory-mcp)
 curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
+codebase-memory-mcp install -y --no-hooks   # keep the MCP server, drop the per-session hooks (Part II §5)
 codebase-memory-mcp config set auto_index true
 codebase-memory-mcp config set auto_index_limit 50000
 
@@ -533,11 +603,11 @@ npx ctx7 setup --claude   # guided setup: auth + install
 # or manually (API key optional — free at context7.com/dashboard, higher rate limits):
 claude mcp add --transport http context7 https://mcp.context7.com/mcp --header "CONTEXT7_API_KEY: <key>"
 
-# Caveman
+# Caveman — optional, measure before keeping (Part III)
 claude plugin marketplace add JuliusBrussee/caveman
 claude plugin install caveman@caveman
 
-# Ponytail
+# Ponytail — optional, measure before keeping (Part III)
 claude plugin marketplace add DietrichGebert/ponytail
 claude plugin install ponytail@ponytail
 
@@ -551,7 +621,6 @@ claude plugin install session-report@claude-plugins-official
 /doctor
 /mcp
 /plugin
-/caveman lite
 ```
 
 ### Windows 10+
@@ -616,11 +685,11 @@ npx ctx7 setup --claude   # guided setup: auth + install
 # or manually (API key optional — free at context7.com/dashboard, higher rate limits):
 claude mcp add --transport http context7 https://mcp.context7.com/mcp --header "CONTEXT7_API_KEY: <key>"
 
-# ── Caveman ───────────────────────────────────────────────────────────
+# ── Caveman — optional, measure before keeping (Part III) ─────────────
 claude plugin marketplace add JuliusBrussee/caveman
 claude plugin install caveman@caveman
 
-# ── Ponytail ──────────────────────────────────────────────────────────
+# ── Ponytail — optional, measure before keeping (Part III) ────────────
 claude plugin marketplace add DietrichGebert/ponytail
 claude plugin install ponytail@ponytail
 
@@ -634,7 +703,6 @@ claude plugin install session-report@claude-plugins-official
 /doctor
 /mcp
 /plugin
-/caveman lite
 ```
 
 #### Windows notes
@@ -650,26 +718,30 @@ Don't trust vendor numbers — measure on your own workflow. Inside a session:
 
 ```
 /context   # what occupies the context window right now (incl. per-MCP-server cost)
-/cost      # token/cost usage of the current session
-/usage     # current usage against your plan / rate limits
+/usage     # session cost, tokens by model, prompt-cache line, plan limits (/cost is an alias)
+/insights  # HTML report on how recent sessions went: friction points, misread requests
 ```
+
+**`/usage` first.** Its Session block carries the cost estimate, tokens by model and the `Prompt cache (main)` line (Part I). On a Pro, Max, Ultra, Team or Enterprise plan it also attributes recent usage to skills, subagents, plugins and individual MCP servers, and lists a recommendation for anything behind 10% or more of it, such as `25%  Trim ~/code/api/CLAUDE.md · 49k tokens per request`. `f` applies the ones Claude Code can act on (2.1.305 or later); `d` and `w` switch between the last 24 hours and the last 7 days. That attribution is the per-plugin and per-server answer the layers above need.
 
 A status-line HUD turns those on-demand calls into a command that re-runs every turn; the CPU arithmetic is in Part V §12.
 
 **Cross-session forensics — Session Report.** [session-report](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/session-report) (official) reads the last week of transcripts under `~/.claude/projects` and drops a self-contained HTML report in the working directory: input/output tokens, cache efficiency and miss causes, the most expensive prompts, subagent and skill usage, and per-session spend — sortable tables and bar charts, plus a skill that surfaces which projects or skills eat disproportionate tokens and whether one prompt skews the totals. This is the layer that actually answers *did it pay off*: whether Caveman nets a saving, whether Context7 fires only when needed, and whether codebase-memory-mcp really reduced Read/Grep. Install, `/reload-plugins`, then invoke its `session-report` skill (ask for a session report). Known cosmetic bug: a missing manifest can list the skill twice under different namespaces — harmless to the report, but it clutters the skills list. Install steps in Part VI.
 
-**Rule:** enable one layer at a time, compare a week of `/cost` and Session Report before and after, keep what pays for itself.
+**Rule:** enable one layer at a time, compare a week of `/usage` and Session Report before and after, keep what pays for itself.
 
 ## Summary
 
 | Tool | Owns | Expected effect |
 | --- | --- | --- |
+| Effort level and model choice (built in) | thinking tokens, per-token price | the first lever: thinking is billed as output and no plugin touches it |
 | codebase-memory-mcp | structural code navigation | ~10× on exploration, −9pp answer quality [study] |
 | ast-grep (CLI — no MCP or plugin surface) | syntax-pattern search, bulk codemods | matches instead of file reads; the CLI edits, the model doesn't [proxy] |
 | TypeScript / Python LSP | definitions, references, type errors | replaces multi-KB grep+read chains [proxy] |
 | Context7 | fresh library docs | indirect — fewer retry loops |
-| Caveman (enable/disable on purpose) | terse agent replies | ~65% of output tokens [measured] |
-| Ponytail (enable/disable on purpose) | minimal code output | ~70% less code on local A/B [measured] |
+| Caveman (opt-in, measure first) | terse agent replies | ~65% of prose output [measured]; costlier per short task on 5.5 models [benchmark] |
+| Ponytail (opt-in, measure first) | minimal code output | ~70% less code on local A/B [measured]; costlier per short task on 5.5 models [benchmark] |
+| `/usage` (built in) | session cost, cache hit rate, per-plugin and per-server attribution | measurement: the first place to look |
 | Session Report (official plugin) | forensic per-session token/cache/subagent/skill report | measurement — proves whether each layer nets out |
 | Browser MCP (Playwright *or* Chrome DevTools, one at a time) | frontend testing / perf-network debugging | toggle per task — idle server is tool-surface tax, snapshots cost 10k+ tokens |
 ---
@@ -678,7 +750,7 @@ A status-line HUD turns those on-demand calls into a command that re-runs every 
 
 Three guides, one split — pick the layer you need:
 
-- [Awesome AGENTS.md](https://github.com/khasky/awesome-agents-md) — the base, tool-agnostic ruleset every agent imports (one `AGENTS.md`). Token optimization sits on top of it.
+- [Silverback](https://github.com/khasky/silverback) — the base, tool-agnostic ruleset every agent imports (one `AGENTS.md`). Token optimization sits on top of it.
 - [Awesome Agent Skills](https://github.com/khasky/awesome-agent-skills) — portable `SKILL.md` skills every agent loads: code review, debugging, security and leak audits, code and text cleanup.
 - **Claude Code Token Optimization** — *this repo:* the token-efficiency layer (LSP, `codebase-memory-mcp`, ast-grep, Context7, Caveman, Ponytail).
 - [Agent MCP Integrations](https://github.com/khasky/agent-mcp-integrations) — MCP servers that connect agents to browsers, cloud, databases, infra, and domain APIs; the two browser servers referenced here are covered there in full.
